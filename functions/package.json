@@ -1,0 +1,16 @@
+{
+  "name": "harnon-functions",
+  "description": "Anthropic API proxy for Harnon",
+  "type": "commonjs",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "serve": "firebase emulators:start --only functions",
+    "deploy": "firebase deploy --only functions"
+  },
+  "dependencies": {
+    "firebase-functions": "^6.1.0"
+  }
+}

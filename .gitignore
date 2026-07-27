@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.firebase/
+*.log
+.env
+.DS_Store
+harbor-autoapply/node_modules/
