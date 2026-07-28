@@ -423,6 +423,41 @@ export default function App() {
     return (j.title || "").toLowerCase().trim() + "|" + (j.company || "").toLowerCase().trim();
   }
 
+  // Cheap, no-network rejection of URLs that are obviously not a specific
+  // posting — catches the most common hallucination shapes (a bare careers
+  // homepage, or a LinkedIn/Indeed *search* URL instead of a listing) before
+  // spending a reachability check or a verify call on them.
+  function looksLikeBadPostingUrl(url) {
+    if (!url || typeof url !== "string") return true;
+    let u;
+    try { u = new URL(url); } catch (e) { return true; }
+    if (!/^https?:$/.test(u.protocol)) return true;
+    const host = u.hostname.replace(/^www\./, "").toLowerCase();
+    const path = u.pathname.replace(/\/+$/, "") || "/";
+    if (path === "/" || /^\/(jobs|careers|job-search|search|opportunities)$/i.test(path)) return true;
+    if (host.endsWith("linkedin.com") && !path.includes("/jobs/view/")) return true;
+    if (host.endsWith("indeed.com") && !(path.includes("/viewjob") || path.includes("/rc/clk"))) return true;
+    return false;
+  }
+
+  // Real HTTP check, run server-side (to dodge CORS and browser fetch
+  // restrictions against third-party sites). Returns [] on any failure so
+  // callers can safely treat "no data" as "don't filter anything out".
+  async function checkUrls(urls) {
+    const list = (urls || []).filter(Boolean);
+    if (!list.length) return [];
+    try {
+      const res = await fetch("/api/check-urls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ urls: list }),
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.results || [];
+    } catch (e) { return []; }
+  }
+
   async function searchBatch(knownKeys) {
     const p = analysis.profile || {};
     const filters =
@@ -442,12 +477,15 @@ export default function App() {
       "Use web search to find 6 real, currently-open job postings in the United States that match this candidate. " +
       filters + exclude +
       "Candidate profile: " + JSON.stringify(p) + ". " +
-      "For each posting, find the actual application/listing URL (LinkedIn, Indeed, or the company careers page). " +
+      "CRITICAL — postingUrl must be a direct link to the ONE specific job listing page, the exact page a candidate would land on to apply for THIS role, never a search-results page, a jobs-category page, or a generic careers homepage. " +
+      "Good: a LinkedIn URL containing '/jobs/view/', an Indeed URL containing '/viewjob', a Greenhouse/Lever/Workday link that resolves straight to that one posting, or a company site URL for that specific role. " +
+      "Bad — never produce these: 'linkedin.com/jobs/search?...', 'indeed.com/jobs?q=...', a bare company careers/jobs homepage, or any URL you are not confident points at this exact posting. " +
+      "If you cannot find a real, direct URL for a posting, leave postingUrl as an empty string — do not guess or invent one. " +
       "After searching, respond with ONLY a JSON array (no markdown, no prose). Each item schema:\n" +
       '{"title":string,"company":string,"location":string,"remote":boolean,' +
       '"matchScore":number(0-100),"matchReasons":[string up to 3],' +
       '"visaSponsorship":"stated"|"likely"|"unknown","visaNote":string(which visa types this employer is known to sponsor, e.g. "H-1B & TN", or ""),' +
-      '"salary":string(or ""),"postingUrl":string,"source":string}. ' +
+      '"salary":string(or ""),"postingUrl":string(direct link to this exact posting, or "" if none found — never fabricated),"source":string}. ' +
       "Base matchScore on real overlap with the candidate's skills and seniority. Only include postings you actually found.";
     const opts = {
       content: instruction,
@@ -520,8 +558,27 @@ export default function App() {
       catch (e) { setError(e.message); break; }
       if (stopRef.current) break;
       cand = (cand || []).filter((c) => !acc.some((a) => jobKey(a) === jobKey(c)));
+      // Drop obviously-bad URL shapes before spending any network/LLM calls on them.
+      cand = cand.filter((c) => !looksLikeBadPostingUrl(c.postingUrl));
       if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
       setSearchPhase("verifying");
+      // Real HTTP check catches hallucinated/dead links (404s, gone domains)
+      // deterministically — much stronger than asking the model to guess.
+      // Only definitively-broken results (ok:false) are dropped; blocked or
+      // inconclusive checks (ok:null, e.g. LinkedIn bot-blocking) pass through
+      // to the existing search-based verify step below.
+      let deadCount = 0;
+      try {
+        const urlResults = await checkUrls(cand.map((c) => c.postingUrl));
+        const badUrls = new Set(urlResults.filter((r) => r.ok === false).map((r) => r.url));
+        if (badUrls.size) {
+          const beforeUrlFilter = cand.length;
+          cand = cand.filter((c) => !badUrls.has(c.postingUrl));
+          deadCount = beforeUrlFilter - cand.length;
+        }
+      } catch (e) { /* best-effort — if the check endpoint is unreachable, don't block the search */ }
+      if (deadCount) setHiddenCount((h) => h + deadCount);
+      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
       const { openOnes, unconfirmedOnes, hidden } = await verifyBatch(cand);
       if (stopRef.current) break;
       const before = acc.length;
@@ -775,7 +832,7 @@ export default function App() {
             )}
             {jobs.length === 0 && !searching && (
               <div className="card" style={{ padding: 20, fontSize: 14 }}>
-                Nothing came back that we could confirm is still open{hiddenCount > 0 ? " (" + hiddenCount + " confirmed closed and left out)" : ""}. Try turning off the visa filter or broadening the location, then search again.
+                Nothing came back that we could confirm is still open{hiddenCount > 0 ? " (" + hiddenCount + " left out — dead link or confirmed closed)" : ""}. Try turning off the visa filter or broadening the location, then search again.
               </div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -814,7 +871,7 @@ export default function App() {
 
             <p style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12 }}>
               {jobs.length > 0 && hiddenCount > 0 && (
-                <>Left out {hiddenCount} listing{hiddenCount > 1 ? "s" : ""} confirmed no longer accepting applications. </>
+                <>Left out {hiddenCount} listing{hiddenCount > 1 ? "s" : ""} with a dead link or confirmed no longer accepting applications. </>
               )}
               Roles above are verified as currently open, but postings can close at any time — reconfirm on the employer's site before applying.
             </p>

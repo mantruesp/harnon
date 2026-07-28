@@ -91,6 +91,48 @@ lock down the open-relay problem directly. Everything below landed as code:
 Everything in the sections below is left as originally written for historical
 context, except where explicitly annotated `[RESOLVED]`.
 
+### 0.1 Follow-up fix — same day: broken/wrong "View posting" links
+
+User-reported bug: clicking "View posting" often landed on a 404, a dead
+link, or a generic job-search page instead of the specific listing. Root
+cause: `searchBatch`'s prompt didn't forbid generic/fabricated URLs strongly
+enough, and nothing in the pipeline ever actually checked that a `postingUrl`
+resolved — the LLM-based verify step only judges plausibility from search
+snippets, it never confirms the link itself works.
+
+Fixed with three layers, applied in `runBatches` before a candidate ever
+reaches the existing search-based verify step:
+1. **Prompt tightened** (`searchBatch` in `App.jsx`): explicit good/bad URL
+   examples, and an explicit instruction to leave `postingUrl` empty rather
+   than fabricate one.
+2. **`looksLikeBadPostingUrl()`** (client, no network): rejects missing/
+   malformed URLs, bare domain or generic `/jobs`, `/careers`, `/search`-style
+   paths, and the two most common "sent me to search instead of the listing"
+   patterns — LinkedIn URLs without `/jobs/view/` and Indeed URLs without
+   `/viewjob`.
+3. **`exports.checkUrls`** (new Cloud Function, `functions/index.js`, wired up
+   via `/api/check-urls` in `firebase.json`): a real server-side HEAD (falling
+   back to GET) request per candidate URL, run from the backend because a
+   browser can't fetch arbitrary third-party origins itself. Classifies each
+   as `ok:true` (reachable), `ok:false` (404/410/5xx — genuinely dead, dropped
+   immediately), or `ok:null` (blocked/timeout/network error — many job
+   boards, LinkedIn especially, reject non-browser requests; this is treated
+   as inconclusive, not broken, so real working links aren't penalized for
+   being bot-protected). Includes a basic SSRF guard (`isPrivateHost`)
+   refusing to fetch loopback/link-local/private-range hosts, since this
+   endpoint fetches whatever URL a client sends it.
+
+Verified end-to-end through the real Firebase Functions emulator (not just
+unit logic): a live URL returned `{ok:true, status:200}` and a deliberately
+broken path on the same domain returned `{ok:false, status:404}`.
+
+**Known limitation:** the `ok:null` (inconclusive) bucket still relies on the
+existing LLM-based verify step, which was the original, weaker mechanism —
+so a hallucinated URL that happens to 403 rather than 404 (e.g. because it
+points at a real domain but wrong path) could still slip through if the
+model's search-based judgment is also fooled. This is a real reduction in the
+failure rate, not a 100% guarantee.
+
 ---
 
 ## 1. What this project is

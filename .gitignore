@@ -5,3 +5,5 @@ dist/
 .env
 .DS_Store
 harnon-autoapply/node_modules/
+*firebase-adminsdk*.json
+*service-account*.json
