@@ -245,10 +245,14 @@ function JobCard({ job, onPrepare, muted }) {
             <button className="btn btn-primary btn-sm" onClick={() => onPrepare(job)}>
               Prepare application
             </button>
-            {job.postingUrl && (
+            {job.postingUrl ? (
               <a className="btn btn-ghost btn-sm" href={job.postingUrl} target="_blank" rel="noopener noreferrer">
                 View posting ↗
               </a>
+            ) : (
+              <span style={{ fontSize: 11.5, color: "var(--muted)", alignSelf: "center" }}>
+                No confirmed link — search "{job.company}" + "{job.title}" directly
+              </span>
             )}
           </div>
         </div>
@@ -423,12 +427,17 @@ export default function App() {
     return (j.title || "").toLowerCase().trim() + "|" + (j.company || "").toLowerCase().trim();
   }
 
-  // Cheap, no-network rejection of URLs that are obviously not a specific
+  // Cheap, no-network check for URLs that are obviously not a specific
   // posting — catches the most common hallucination shapes (a bare careers
-  // homepage, or a LinkedIn/Indeed *search* URL instead of a listing) before
-  // spending a reachability check or a verify call on them.
+  // homepage, or a LinkedIn/Indeed *search* URL instead of a listing).
+  // IMPORTANT: an empty/missing URL is NOT "bad" here — the model may
+  // honestly not have found a confident direct link, and that's fine; the
+  // job itself is still a real match. This only flags a URL that *is*
+  // present but looks wrong, so callers can drop the link without dropping
+  // the job.
   function looksLikeBadPostingUrl(url) {
-    if (!url || typeof url !== "string") return true;
+    if (!url) return false;
+    if (typeof url !== "string") return true;
     let u;
     try { u = new URL(url); } catch (e) { return true; }
     if (!/^https?:$/.test(u.protocol)) return true;
@@ -558,27 +567,30 @@ export default function App() {
       catch (e) { setError(e.message); break; }
       if (stopRef.current) break;
       cand = (cand || []).filter((c) => !acc.some((a) => jobKey(a) === jobKey(c)));
-      // Drop obviously-bad URL shapes before spending any network/LLM calls on them.
-      cand = cand.filter((c) => !looksLikeBadPostingUrl(c.postingUrl));
       if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
       setSearchPhase("verifying");
+      // A bad or dead link disqualifies the LINK, not the JOB — a real match
+      // with no confirmed URL is still worth showing (it just won't get a
+      // "View posting" button). Strip the URL rather than dropping the
+      // candidate; dropping candidates here previously meant a model that
+      // (correctly, per the prompt) left postingUrl empty when unsure could
+      // wipe out an entire batch.
+      cand = cand.map((c) => (looksLikeBadPostingUrl(c.postingUrl) ? { ...c, postingUrl: "" } : c));
       // Real HTTP check catches hallucinated/dead links (404s, gone domains)
       // deterministically — much stronger than asking the model to guess.
-      // Only definitively-broken results (ok:false) are dropped; blocked or
-      // inconclusive checks (ok:null, e.g. LinkedIn bot-blocking) pass through
-      // to the existing search-based verify step below.
-      let deadCount = 0;
-      try {
-        const urlResults = await checkUrls(cand.map((c) => c.postingUrl));
-        const badUrls = new Set(urlResults.filter((r) => r.ok === false).map((r) => r.url));
-        if (badUrls.size) {
-          const beforeUrlFilter = cand.length;
-          cand = cand.filter((c) => !badUrls.has(c.postingUrl));
-          deadCount = beforeUrlFilter - cand.length;
-        }
-      } catch (e) { /* best-effort — if the check endpoint is unreachable, don't block the search */ }
-      if (deadCount) setHiddenCount((h) => h + deadCount);
-      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
+      // Only definitively-broken results (ok:false) clear the link; blocked
+      // or inconclusive checks (ok:null, e.g. LinkedIn bot-blocking) are left
+      // alone rather than penalized.
+      const withUrls = cand.filter((c) => c.postingUrl);
+      if (withUrls.length) {
+        try {
+          const urlResults = await checkUrls(withUrls.map((c) => c.postingUrl));
+          const badUrls = new Set(urlResults.filter((r) => r.ok === false).map((r) => r.url));
+          if (badUrls.size) {
+            cand = cand.map((c) => (badUrls.has(c.postingUrl) ? { ...c, postingUrl: "" } : c));
+          }
+        } catch (e) { /* best-effort — if the check endpoint is unreachable, leave URLs as-is */ }
+      }
       const { openOnes, unconfirmedOnes, hidden } = await verifyBatch(cand);
       if (stopRef.current) break;
       const before = acc.length;
@@ -832,7 +844,7 @@ export default function App() {
             )}
             {jobs.length === 0 && !searching && (
               <div className="card" style={{ padding: 20, fontSize: 14 }}>
-                Nothing came back that we could confirm is still open{hiddenCount > 0 ? " (" + hiddenCount + " left out — dead link or confirmed closed)" : ""}. Try turning off the visa filter or broadening the location, then search again.
+                Nothing came back that we could confirm is still open{hiddenCount > 0 ? " (" + hiddenCount + " confirmed closed and left out)" : ""}. Try turning off the visa filter or broadening the location, then search again.
               </div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -871,7 +883,7 @@ export default function App() {
 
             <p style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12 }}>
               {jobs.length > 0 && hiddenCount > 0 && (
-                <>Left out {hiddenCount} listing{hiddenCount > 1 ? "s" : ""} with a dead link or confirmed no longer accepting applications. </>
+                <>Left out {hiddenCount} listing{hiddenCount > 1 ? "s" : ""} confirmed no longer accepting applications. </>
               )}
               Roles above are verified as currently open, but postings can close at any time — reconfirm on the employer's site before applying.
             </p>

@@ -133,6 +133,36 @@ points at a real domain but wrong path) could still slip through if the
 model's search-based judgment is also fooled. This is a real reduction in the
 failure rate, not a 100% guarantee.
 
+### 0.2 Follow-up fix — same day: the 0.1 fix caused zero results
+
+Immediately after 0.1 shipped, the user reported getting **no open positions
+at all**. Root cause was a severity mismatch in how a bad link was handled:
+`looksLikeBadPostingUrl("")` returned `true` (empty string is falsy → treated
+as "bad"), and `runBatches` used that verdict to **filter the candidate out
+of the batch entirely** — dropping the whole job, not just the link. Combined
+with 0.1's own prompt change ("leave postingUrl empty rather than guess"),
+models correctly complying with the new instruction by leaving the field
+blank caused entire batches to be discarded, since nearly every candidate
+now looked "bad" by that check.
+
+Fixed by separating the two concerns that had been conflated: a missing or
+untrustworthy URL disqualifies the **link**, not the **job**.
+`looksLikeBadPostingUrl("")` now returns `false` (no URL isn't "bad", just
+nothing to show), and both the heuristic check and the `checkUrls` HTTP check
+now clear `postingUrl` to `""` on a bad verdict instead of removing the
+candidate from `cand`. The job — title, company, match score, visa info —
+still reaches the user; it just renders without a "View posting" button
+(`JobCard` already showed the button conditionally, so this required no new
+UI state, only a small explanatory line — `No confirmed link — search
+"{company}" + "{title}" directly` — where the button used to be). This
+restores the original recall while keeping 0.1's actual fix (no more
+404s/wrong-link clicks) intact.
+
+**Lesson for future prompt changes:** telling a model "don't fabricate, leave
+X blank if unsure" is a real behavior change, not just documentation — code
+that treats "blank" as a failure condition needs to be updated in the same
+change, not after the fact.
+
 ---
 
 ## 1. What this project is
