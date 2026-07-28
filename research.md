@@ -190,6 +190,45 @@ the original false positives (dead links). The net design that stuck: verify
 with real, objective signals (an HTTP 404 is a fact) and be permissive
 everywhere guessing would otherwise be required.
 
+### 0.4 Reverted entirely — same day, owner decision: no link validation at all
+
+After 0.1–0.3, the owner made the product call directly rather than continuing
+to tune the validation: **no URL heuristics, no reachability checks, no
+disclaimer copy — just show whatever `postingUrl` the model returned, exactly
+as the app did before this whole sub-thread started.** Reasoning given: the
+"fancy" validation kept trading one failure mode for another (dead links vs.
+missing jobs vs. missing links on real jobs), and the simplest version — show
+the link if the model found one, don't second-guess it — is what was actually
+wanted.
+
+Fully reverted in this pass:
+- Removed `looksLikeBadPostingUrl()` and the `checkUrls()` client helper from
+  `App.jsx`, and their call sites in `runBatches`.
+- Removed `exports.checkUrls`, `checkOneUrl`, `isPrivateHost`, and the
+  `/api/check-urls` route entirely from `functions/index.js` and
+  `firebase.json` — dead code, deleted rather than left disabled.
+- Reverted `JobCard`'s conditional rendering back to a plain
+  `{job.postingUrl && <a>...</a>}` — no "No confirmed link" message.
+- Reverted the `searchBatch` prompt back to the original one-line instruction
+  ("find the actual application/listing URL") and the plain
+  `"postingUrl":string` schema field, dropping all the good/bad-example
+  verbosity added across 0.1–0.3.
+
+Net result: the production build after this revert is **byte-for-byte
+identical** to the build from before 0.1 (`dist/assets/index-DNH_UTef.js`,
+same size, same hash) — confirming this is a clean, complete revert of the
+whole link-validation sub-thread, not a partial one.
+
+**What this means going forward:** `postingUrl` is once again exactly as
+reliable as the underlying model's search grounding, no more, no less. On
+Claude models with `web_search` enabled this is generally solid because
+`postingUrl` comes from real search results. On free models (Groq, Gemini —
+no live search, see §"Supported models" in the README), `postingUrl` is a
+recall guess from training data with no grounding at all, and will 404 or
+misdirect meaningfully more often — that trade-off is inherent to using a
+non-search model, not a bug, and is already documented in the README's
+model-comparison table.
+
 ---
 
 ## 1. What this project is

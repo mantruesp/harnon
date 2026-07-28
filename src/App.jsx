@@ -245,14 +245,10 @@ function JobCard({ job, onPrepare, muted }) {
             <button className="btn btn-primary btn-sm" onClick={() => onPrepare(job)}>
               Prepare application
             </button>
-            {job.postingUrl ? (
+            {job.postingUrl && (
               <a className="btn btn-ghost btn-sm" href={job.postingUrl} target="_blank" rel="noopener noreferrer">
                 View posting ↗
               </a>
-            ) : (
-              <span style={{ fontSize: 11.5, color: "var(--muted)", alignSelf: "center" }}>
-                No confirmed link — search "{job.company}" + "{job.title}" directly
-              </span>
             )}
           </div>
         </div>
@@ -427,43 +423,6 @@ export default function App() {
     return (j.title || "").toLowerCase().trim() + "|" + (j.company || "").toLowerCase().trim();
   }
 
-  // Minimal, no-network sanity check — deliberately loose. Job boards and
-  // company career sites use too many different URL shapes to pattern-match
-  // reliably (an earlier, stricter version here rejected plenty of real
-  // links), so this only catches things that can't possibly be a specific
-  // posting: not a URL at all, or a bare domain root with no path. Everything
-  // else is trusted and shown; the deterministic HTTP check below is what
-  // actually catches dead links, not guesswork about URL shape.
-  // An empty/missing URL is NOT "bad" — the model may honestly not have
-  // found one, and that's fine; the job itself is still a real match.
-  function looksLikeBadPostingUrl(url) {
-    if (!url) return false;
-    if (typeof url !== "string") return true;
-    let u;
-    try { u = new URL(url); } catch (e) { return true; }
-    if (!/^https?:$/.test(u.protocol)) return true;
-    const path = u.pathname.replace(/\/+$/, "") || "/";
-    return path === "/";
-  }
-
-  // Real HTTP check, run server-side (to dodge CORS and browser fetch
-  // restrictions against third-party sites). Returns [] on any failure so
-  // callers can safely treat "no data" as "don't filter anything out".
-  async function checkUrls(urls) {
-    const list = (urls || []).filter(Boolean);
-    if (!list.length) return [];
-    try {
-      const res = await fetch("/api/check-urls", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls: list }),
-      });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return data.results || [];
-    } catch (e) { return []; }
-  }
-
   async function searchBatch(knownKeys) {
     const p = analysis.profile || {};
     const filters =
@@ -483,13 +442,12 @@ export default function App() {
       "Use web search to find 6 real, currently-open job postings in the United States that match this candidate. " +
       filters + exclude +
       "Candidate profile: " + JSON.stringify(p) + ". " +
-      "postingUrl should be a direct link to the ONE specific job listing page from your search results — the page a candidate would land on to apply for THIS role, not a search-results page or a generic careers homepage. " +
-      "Use the actual URL from your search results — prefer giving your best real link over leaving it blank. Only use an empty string if search genuinely returned no link at all for that posting; never fabricate a URL that didn't come from your search results. " +
+      "For each posting, find the actual application/listing URL (LinkedIn, Indeed, or the company careers page). " +
       "After searching, respond with ONLY a JSON array (no markdown, no prose). Each item schema:\n" +
       '{"title":string,"company":string,"location":string,"remote":boolean,' +
       '"matchScore":number(0-100),"matchReasons":[string up to 3],' +
       '"visaSponsorship":"stated"|"likely"|"unknown","visaNote":string(which visa types this employer is known to sponsor, e.g. "H-1B & TN", or ""),' +
-      '"salary":string(or ""),"postingUrl":string(direct link to this exact posting, or "" if none found — never fabricated),"source":string}. ' +
+      '"salary":string(or ""),"postingUrl":string,"source":string}. ' +
       "Base matchScore on real overlap with the candidate's skills and seniority. Only include postings you actually found.";
     const opts = {
       content: instruction,
@@ -564,28 +522,6 @@ export default function App() {
       cand = (cand || []).filter((c) => !acc.some((a) => jobKey(a) === jobKey(c)));
       if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
       setSearchPhase("verifying");
-      // A bad or dead link disqualifies the LINK, not the JOB — a real match
-      // with no confirmed URL is still worth showing (it just won't get a
-      // "View posting" button). Strip the URL rather than dropping the
-      // candidate; dropping candidates here previously meant a model that
-      // (correctly, per the prompt) left postingUrl empty when unsure could
-      // wipe out an entire batch.
-      cand = cand.map((c) => (looksLikeBadPostingUrl(c.postingUrl) ? { ...c, postingUrl: "" } : c));
-      // Real HTTP check catches hallucinated/dead links (404s, gone domains)
-      // deterministically — much stronger than asking the model to guess.
-      // Only definitively-broken results (ok:false) clear the link; blocked
-      // or inconclusive checks (ok:null, e.g. LinkedIn bot-blocking) are left
-      // alone rather than penalized.
-      const withUrls = cand.filter((c) => c.postingUrl);
-      if (withUrls.length) {
-        try {
-          const urlResults = await checkUrls(withUrls.map((c) => c.postingUrl));
-          const badUrls = new Set(urlResults.filter((r) => r.ok === false).map((r) => r.url));
-          if (badUrls.size) {
-            cand = cand.map((c) => (badUrls.has(c.postingUrl) ? { ...c, postingUrl: "" } : c));
-          }
-        } catch (e) { /* best-effort — if the check endpoint is unreachable, leave URLs as-is */ }
-      }
       const { openOnes, unconfirmedOnes, hidden } = await verifyBatch(cand);
       if (stopRef.current) break;
       const before = acc.length;
