@@ -110,17 +110,25 @@ function isRateLimited(req) {
 }
 
 // Applies CORS headers when the request's Origin is allowlisted. Returns
-// whether the origin was allowed so callers can reject disallowed requests.
+// whether the request should proceed.
 function applyCors(req, res) {
+  // Same-origin requests — which is what this app always makes, calling its
+  // own /api/* via a relative path — do NOT carry an Origin header at all;
+  // browsers only send one for genuinely cross-origin requests. So a missing
+  // Origin is not suspicious (it's the normal, legitimate case here, along
+  // with non-browser tools, which the rate limiter below guards against
+  // instead). An Origin header that IS present but not on the allowlist
+  // means some other website's page is trying to call this API through a
+  // visitor's browser — that's the case this actually needs to reject.
   const origin = req.headers.origin;
-  const allowed = !!origin && ALLOWED_ORIGINS.has(origin);
-  if (allowed) {
+  if (origin) {
+    if (!ALLOWED_ORIGINS.has(origin)) return false;
     res.set("Access-Control-Allow-Origin", origin);
     res.set("Vary", "Origin");
   }
   res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.set("Access-Control-Allow-Headers", "Content-Type");
-  return allowed;
+  return true;
 }
 
 // ──────────────────────── Anthropic call ────────────────────────

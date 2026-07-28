@@ -269,6 +269,33 @@ all, see the Oracle example earlier in this thread) exactly the same way it
 fixes the Claude-with-search case (grounded, but can still hallucinate a
 plausible-shaped dead URL, as Boeing shows).
 
+### 0.6 Critical fix: origin-allowlist blocked the app's own requests
+
+Found while smoke-testing an (unrelated, separately-branched) rewrite against
+a real Firebase emulator: `/api/models` returned 403 even for the app's own
+same-origin request. Root cause: `applyCors()`'s origin check
+(`!!origin && ALLOWED_ORIGINS.has(origin)`, added in §0's proxy-hardening
+pass) assumed a browser always sends an `Origin` header — but browsers do
+**not** send one for genuinely same-origin requests. Confirmed empirically
+via a `fetch('/api/models')` run from the actual page: the server received
+`Origin: null`. Since this app always calls its own backend via relative
+`/api/*` paths (same-origin, by construction), **every legitimate request
+would have been rejected the moment a deploy actually succeeded** — this bug
+had been sitting on `main` undetected only because every deploy attempt up to
+this point had failed on unrelated IAM permission issues (§ deploy troubleshooting
+in this session's chat history), so it never got a chance to break anything
+for a real user.
+
+Fixed in `applyCors()`: a missing `Origin` header is now treated as
+legitimate (same-origin) traffic and allowed through; an `Origin` header that
+IS present but doesn't match `ALLOWED_ORIGINS` is what gets rejected — that's
+the case where it actually matters (another website's page trying to call
+this API cross-origin through a visitor's browser). This preserves the
+original intent (§0/§5.1) while fixing the same-origin case it broke.
+Verified via direct `fetch()` calls from a running instance of the app,
+before and after the fix, both for the previously-broken same-origin case and
+for the intentionally-still-blocked cross-origin case.
+
 ---
 
 ## 1. What this project is
