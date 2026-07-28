@@ -3,9 +3,11 @@
 // device — your resume (name, email, phone) is never sent to a shared database.
 // If you later want cross-device access by ID, swap this for Firestore behind auth.
 
-const keyFor = (id) => "harnon:resume:" + id;
+import type { ResumeAnalysis, ResumeRecord } from "./types";
 
-export function saveResume(id, analysis, resumeText) {
+const keyFor = (id: string) => "harnon:resume:" + id;
+
+export function saveResume(id: string, analysis: ResumeAnalysis, resumeText: string): void {
   try {
     localStorage.setItem(keyFor(id), JSON.stringify({ id, createdAt: Date.now(), analysis, resumeText }));
   } catch (e) {
@@ -13,7 +15,7 @@ export function saveResume(id, analysis, resumeText) {
   }
 }
 
-export function loadResumeRecord(id) {
+export function loadResumeRecord(id: string): ResumeRecord | null {
   try {
     const raw = localStorage.getItem(keyFor(id));
     return raw ? JSON.parse(raw) : null;
