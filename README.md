@@ -8,17 +8,25 @@ a real Chromium.
 
 ## How it's put together
 
+TypeScript + React Router. `npm run build` type-checks (`tsc --noEmit`) before
+building.
+
 ```
 harnon/
 ├── .github/workflows/deploy.yml   auto-deploy to Firebase on merge to main
 ├── index.html                     Vite entry
 ├── src/
-│   ├── App.jsx                    the app (model selector, calls /api/llm)
-│   ├── storage.js                 saves resume summaries in localStorage by ID
-│   ├── main.jsx
-│   └── index.css
+│   ├── App.tsx                    routes: "/" and "/r/:id" (deep-link a saved resume)
+│   ├── main.tsx
+│   ├── index.css                  global stylesheet (design tokens + component styles)
+│   ├── storage.ts                 saves resume summaries in localStorage by ID
+│   ├── types/                     shared TypeScript interfaces
+│   ├── api/client.ts              callClaude, extractJson, checkUrls, makeId
+│   ├── hooks/                     useModels, useResume, useJobSearch, useApplicationKit, useLocalHelper
+│   ├── components/                MatchRing, JobCard, VisaPill, Toggle, KitBlock, CopyRow, AutofillSheet
+│   └── pages/HomePage.tsx         assembles the hooks + components into the full flow
 ├── functions/
-│   └── index.js                   Cloud Function: multi-provider proxy
+│   └── index.js                   Cloud Function: multi-provider proxy + link-reachability check
 ├── firebase.json                  hosting + /api rewrites + SPA fallback
 ├── .firebaserc                    your Firebase project id goes here
 └── harnon-autoapply/              optional local Chromium auto-fill helper

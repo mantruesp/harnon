@@ -269,32 +269,69 @@ all, see the Oracle example earlier in this thread) exactly the same way it
 fixes the Claude-with-search case (grounded, but can still hallucinate a
 plausible-shaped dead URL, as Boeing shows).
 
-### 0.6 Critical fix: origin-allowlist blocked the app's own requests
+### 0.6 Full rewrite: TypeScript, React Router, component/hook structure
 
-Found while smoke-testing an (unrelated, separately-branched) rewrite against
-a real Firebase emulator: `/api/models` returned 403 even for the app's own
-same-origin request. Root cause: `applyCors()`'s origin check
-(`!!origin && ALLOWED_ORIGINS.has(origin)`, added in §0's proxy-hardening
-pass) assumed a browser always sends an `Origin` header — but browsers do
-**not** send one for genuinely same-origin requests. Confirmed empirically
-via a `fetch('/api/models')` run from the actual page: the server received
-`Origin: null`. Since this app always calls its own backend via relative
-`/api/*` paths (same-origin, by construction), **every legitimate request
+Owner requested a full rewrite (structure and tooling, not behavior) after the
+link-check work above: TypeScript, a routing library, a proper CSS approach,
+and the single ~950-line `App.jsx` broken into components/hooks. Done on a
+separate branch, explicitly **not** merged to `main`, per instruction.
+
+- **TypeScript**: `tsconfig.json` added (`strict: true`), `@types/react`/
+  `@types/react-dom` pinned to the v18 line to match the actual React version
+  (they'd resolved to v19 types by default, which would have silently
+  mismatched). `npm run build` now runs `tsc --noEmit` before `vite build`.
+- **React Router** (`react-router-dom@7.18.1`, pinned above the 7.11.0 line to
+  avoid a set of client-routing-relevant advisories — the one remaining
+  flagged advisory at this version is specific to RSC/server-actions mode,
+  which this plain client-side SPA never uses). Two routes: `/` (the exact
+  original single-continuous-page flow, unchanged) and a new, additive `/r/:id`
+  that auto-loads a saved resume by ID — a genuine use of routing that didn't
+  exist before, surfaced via a new "Copy link" button next to "Copy ID".
+- **Component/hook extraction**, all ported as faithful 1:1 logic moves (not
+  rewrites) from the original `App.jsx`: `types/index.ts` (shared interfaces),
+  `api/client.ts` (`callClaude`, `extractJson`, `salvageJsonArray`, `checkUrls`,
+  `makeId`), `storage.ts`, seven presentational components
+  (`MatchRing`/`VisaPill`/`Toggle`/`JobCard`/`KitBlock`/`CopyRow`/`AutofillSheet`),
+  and four hooks (`useModels`, `useLocalHelper`, `useResume`, `useJobSearch`,
+  `useApplicationKit`). `stage` (1/2/3, previously independent state) is now
+  derived from `analysis`/`jobs` presence instead of being set redundantly in
+  three places — behavior-preserving, confirmed by tracing the original's
+  exact `setStage` call sites.
+- **Real stylesheet**: the `STYLE` template string that was injected into
+  `document.head` at runtime via a `useEffect` is now `src/index.css`, a
+  normal Vite-processed stylesheet (same content, byte-equivalent rules) —
+  no more FOUC risk, and it now shows up as its own cacheable asset
+  (`dist/assets/index-*.css`, 5.4kB) instead of being bundled into the JS.
+
+**Critical bug found and fixed during smoke-testing, merged into `main`:**
+while testing the rewrite against a real Firebase emulator, `/api/models`
+returned 403 even for the app's own same-origin request. Root cause: the
+origin-allowlist logic added earlier in this session
+(`!!origin && ALLOWED_ORIGINS.has(origin)`) assumed a browser always sends an
+`Origin` header — but browsers do **not** send one for genuinely same-origin
+requests (confirmed empirically: a `fetch('/api/models')` from the app's own
+page showed `Origin: null` server-side). Since this app always calls its own
+backend via relative `/api/*` paths, essentially **every legitimate request
 would have been rejected the moment a deploy actually succeeded** — this bug
-had been sitting on `main` undetected only because every deploy attempt up to
-this point had failed on unrelated IAM permission issues (§ deploy troubleshooting
-in this session's chat history), so it never got a chance to break anything
-for a real user.
+was sitting on `main`, undetected only because every deploy attempt up to
+that point had failed on unrelated IAM issues. Fixed in `applyCors()`:
+missing `Origin` is now treated as legitimate same-origin traffic (allowed);
+an `Origin` header that IS present but doesn't match the allowlist is what
+gets rejected (this is the case that matters — another website's page
+calling this API cross-origin through a visitor's browser). Verified via
+`javascript_tool` fetches from the actual running app before and after the
+fix, and by understanding why POST requests (which DO carry Origin even
+same-origin, unlike GET) were separately blocked by a temporary test-port
+allowlist entry (removed once testing was done). This fix landed on `main`
+independently first (as a one-file, low-risk correctness fix, since `main` is
+what the CI/CD pipeline actually deploys), then again here as part of merging
+this branch back in.
 
-Fixed in `applyCors()`: a missing `Origin` header is now treated as
-legitimate (same-origin) traffic and allowed through; an `Origin` header that
-IS present but doesn't match `ALLOWED_ORIGINS` is what gets rejected — that's
-the case where it actually matters (another website's page trying to call
-this API cross-origin through a visitor's browser). This preserves the
-original intent (§0/§5.1) while fixing the same-origin case it broke.
-Verified via direct `fetch()` calls from a running instance of the app,
-before and after the fix, both for the previously-broken same-origin case and
-for the intentionally-still-blocked cross-origin case.
+Verified end-to-end against the real Anthropic API (not mocked) through the
+rewritten app: resume analysis (score, summary, skills, improvements),
+resume-to-ID save/"Copy link", and the batched job-search loop (batch
+progress, Stop control) all rendered and behaved identically to the
+pre-rewrite version.
 
 ---
 
