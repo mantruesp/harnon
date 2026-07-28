@@ -423,6 +423,24 @@ export default function App() {
     return (j.title || "").toLowerCase().trim() + "|" + (j.company || "").toLowerCase().trim();
   }
 
+  // Real HTTP check, run server-side (the browser can't fetch arbitrary
+  // third-party origins itself). Returns [] on any failure so callers can
+  // safely treat "no data" as "don't filter anything out".
+  async function checkUrls(urls) {
+    const list = (urls || []).filter(Boolean);
+    if (!list.length) return [];
+    try {
+      const res = await fetch("/api/check-urls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ urls: list }),
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.results || [];
+    } catch (e) { return []; }
+  }
+
   async function searchBatch(knownKeys) {
     const p = analysis.profile || {};
     const filters =
@@ -520,6 +538,20 @@ export default function App() {
       catch (e) { setError(e.message); break; }
       if (stopRef.current) break;
       cand = (cand || []).filter((c) => !acc.some((a) => jobKey(a) === jobKey(c)));
+      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
+      // Only positions with a real, working link get shown at all — a job
+      // with no URL, or a URL that comes back with a genuine 404/410/5xx,
+      // is dropped here rather than shown without a "View posting" button.
+      // Inconclusive checks (a job board blocking the automated request
+      // with a 401/403/429, or a timeout) are NOT treated as broken — that's
+      // not proof the link is dead, just that we couldn't confirm it.
+      cand = cand.filter((c) => c.postingUrl);
+      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
+      try {
+        const urlResults = await checkUrls(cand.map((c) => c.postingUrl));
+        const deadUrls = new Set(urlResults.filter((r) => r.ok === false).map((r) => r.url));
+        if (deadUrls.size) cand = cand.filter((c) => !deadUrls.has(c.postingUrl));
+      } catch (e) { /* best-effort — if the check endpoint is unreachable, don't block the search */ }
       if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
       setSearchPhase("verifying");
       const { openOnes, unconfirmedOnes, hidden } = await verifyBatch(cand);

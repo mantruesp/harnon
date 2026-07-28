@@ -229,6 +229,46 @@ misdirect meaningfully more often — that trade-off is inherent to using a
 non-search model, not a bug, and is already documented in the README's
 model-comparison table.
 
+### 0.5 Re-added, redesigned: require a real link, verified by proof not guesswork
+
+User supplied a concrete failing example —
+`https://jobs.boeing.com/job/arlington/it-program-manager-enterprise-systems/185/68234521`
+— confirmed via `curl` to return a genuine HTTP 404 from Boeing's own ATS.
+The URL has the *correct shape* for Boeing's applicant-tracking system (which
+is why it looked convincing) but the specific IDs don't correspond to a real
+posting — a hallucination, not a stale listing. This is exactly the class of
+failure 0.4's full revert reopened.
+
+New design, explicitly requested: **only show positions with a real, working
+link — verified by an actual HTTP request, never by guessing about URL
+shape.** This intentionally does NOT resurrect `looksLikeBadPostingUrl()`
+(0.1's pattern-matching approach) — that was the source of 0.2/0.3's false
+positives, not the reachability check itself. This time:
+- `exports.checkUrls` (Cloud Function, `/api/check-urls`) is back, unchanged
+  from 0.1/0.2's implementation: real HEAD/GET request per URL, SSRF-guarded,
+  classifies `ok:true` (reachable) / `ok:false` (confirmed 404/410/5xx) /
+  `ok:null` (blocked/timeout — inconclusive, e.g. LinkedIn's bot detection).
+- In `runBatches`, a candidate is now dropped entirely — not just stripped of
+  its link — if it has no `postingUrl` at all, or if the check comes back
+  `ok:false`. This is a deliberate behavior change from 0.2-0.4: a job
+  without a confirmed-real link is no longer shown, full stop, per explicit
+  request ("only show me positions with real links").
+- `ok:null` (inconclusive) candidates are kept, not dropped — a job board
+  blocking an automated HEAD request is not proof the link is dead, and
+  treating it as such would gut recall for exactly the boards (LinkedIn,
+  Indeed) most job postings come from.
+
+Verified end-to-end via the Firebase emulator against the user's actual
+reported URL: `{"url":".../68234521","ok":false,"status":404}` — confirmed
+this exact posting would now be excluded.
+
+**This does not depend on which model is used.** Whether or not the
+generating model had web search, the reachability check is an independent,
+model-agnostic fact-check — it fixes the free-model case (no grounding at
+all, see the Oracle example earlier in this thread) exactly the same way it
+fixes the Claude-with-search case (grounded, but can still hallucinate a
+plausible-shaped dead URL, as Boeing shows).
+
 ---
 
 ## 1. What this project is
