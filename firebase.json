@@ -3,7 +3,9 @@
     "public": "dist",
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "rewrites": [
-      { "source": "/api/claude", "function": "claude" },
+      { "source": "/api/claude", "function": "llm" },
+      { "source": "/api/llm", "function": "llm" },
+      { "source": "/api/models", "function": "models" },
       { "source": "**", "destination": "/index.html" }
     ]
   },

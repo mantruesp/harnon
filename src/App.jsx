@@ -47,6 +47,7 @@ textarea,input[type=text]{width:100%;font-family:inherit;font-size:14px;color:va
   transition:border-color .15s,box-shadow .15s}
 textarea:focus,input[type=text]:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-050)}
 textarea::placeholder,input::placeholder{color:#9AAAB4}
+select:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-050)}
 .chip{display:inline-flex;align-items:center;background:var(--primary-050);color:var(--primary-600);
   border-radius:999px;padding:5px 11px;font-size:12px;font-weight:600;margin:0 6px 6px 0}
 .steps{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:14px 0 26px}
@@ -108,11 +109,11 @@ function extractJson(raw) {
   return JSON.parse(t.slice(start, end + 1));
 }
 
-async function callClaude({ system, content, tools, maxTokens = 4096 }) {
+async function callClaude({ system, content, tools, maxTokens = 4096, model }) {
   const res = await fetch(API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ system, content, tools, max_tokens: maxTokens }),
+    body: JSON.stringify({ system, content, tools, max_tokens: maxTokens, model }),
   });
   if (!res.ok) {
     let msg = "The request failed (" + res.status + "). Please try again.";
@@ -201,6 +202,12 @@ export default function App() {
   const fileRef = useRef();
   const stopRef = useRef(false);
 
+  // Model selector
+  const [availableModels, setAvailableModels] = useState([]);
+  const [selectedModel, setSelectedModel] = useState("");
+  const currentModel = availableModels.find((m) => m.id === selectedModel) || {};
+  const hasWebSearch = currentModel.webSearch === true;
+
   useEffect(() => {
     const l = document.createElement("link");
     l.rel = "stylesheet";
@@ -209,6 +216,18 @@ export default function App() {
     const s = document.createElement("style");
     s.textContent = STYLE;
     document.head.appendChild(s);
+  }, []);
+
+  // Fetch available models from the backend
+  useEffect(() => {
+    fetch("/api/models")
+      .then((r) => (r.ok ? r.json() : Promise.reject(r)))
+      .then((d) => {
+        const list = d.models || [];
+        setAvailableModels(list);
+        if (list.length > 0 && !selectedModel) setSelectedModel(list[0].id);
+      })
+      .catch(() => {});
   }, []);
 
   // Detect the local auto-apply helper (only reachable when running on the user's machine)
@@ -266,7 +285,7 @@ export default function App() {
         '"improvements":[{"issue":string,"fix":string}],' +
         '"atsKeywords":[string],' +
         '"resumeText":string(the full resume as clean plain text, so it can be reused later)}';
-      const text = await callClaude({ content: resumeContent(instruction), maxTokens: 4096 });
+      const text = await callClaude({ content: resumeContent(instruction), maxTokens: 4096, model: selectedModel });
       const parsed = extractJson(text);
       const rt = resumeText.trim() ? resumeText : (parsed.resumeText || "");
       if (!resumeText.trim() && parsed.resumeText) setResumeText(parsed.resumeText);
@@ -322,17 +341,23 @@ export default function App() {
       '"visaSponsorship":"stated"|"likely"|"unknown","visaNote":string(which visa types this employer is known to sponsor, e.g. "H-1B & TN", or ""),' +
       '"salary":string(or ""),"postingUrl":string,"source":string}. ' +
       "Base matchScore on real overlap with the candidate's skills and seniority. Only include postings you actually found.";
-    const text = await callClaude({
+    const opts = {
       content: instruction,
-      system: "You are a diligent US job-search assistant. Only return postings backed by real search results with working URLs.",
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      system: "You are a diligent US job-search assistant. " + (hasWebSearch ? "Only return postings backed by real search results with working URLs." : "Return the best real postings you know of with real company career-page or LinkedIn URLs. Use your training data since live search is not available."),
       maxTokens: 4096,
-    });
+      model: selectedModel,
+    };
+    if (hasWebSearch) opts.tools = [{ type: "web_search_20250305", name: "web_search" }];
+    const text = await callClaude(opts);
     const arr = extractJson(text);
     return Array.isArray(arr) ? arr : arr.jobs || [];
   }
 
   async function verifyBatch(cands) {
+    // Without web search we can't verify live — pass all through as unverified
+    if (!hasWebSearch) {
+      return { openOnes: cands.map((j) => ({ ...j, status: "unverified", checkedNote: "No live search on this model" })), hidden: 0 };
+    }
     const today = new Date().toISOString().slice(0, 10);
     const verifyInstruction =
       "Today is " + today + ". Use web search to verify whether each of these job postings is REAL and STILL ACCEPTING APPLICATIONS right now. " +
@@ -349,6 +374,7 @@ export default function App() {
         system: "You verify job postings against live web results. Never mark a posting open unless the search results support it.",
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         maxTokens: 4096,
+        model: selectedModel,
       });
       const varr = extractJson(vtext);
       verified = Array.isArray(varr) ? varr : varr.jobs || [];
@@ -437,7 +463,7 @@ export default function App() {
         '"willRelocate":string("Yes"|"No"|"Confirm"),' +
         '"screeningAnswers":[{"q":string,"a":string}] (write ready-to-paste answers to 4-5 common portal questions tailored to THIS job and company, e.g. "Why do you want to work here?", "Describe your most relevant experience", "What is your greatest strength?")},' +
         '"prepNotes":[string(2-4 quick tips: keywords to add, likely interview themes, or gaps to address)]}';
-      const text = await callClaude({ content: resumeContent(instruction), maxTokens: 4096 });
+      const text = await callClaude({ content: resumeContent(instruction), maxTokens: 4096, model: selectedModel });
       setKit(extractJson(text));
     } catch (e) { setError(e.message); setActiveJob(null); }
     setBuildingKit(false);
@@ -447,16 +473,40 @@ export default function App() {
     <div className="harbor">
       <div className="wrap">
         {/* header */}
-        <header style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
+        <header style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4, flexWrap: "wrap" }}>
           <svg width="30" height="30" viewBox="0 0 32 32" fill="none">
             <circle cx="16" cy="9" r="3" stroke="#0E7C7B" strokeWidth="2.2" />
             <path d="M16 12v14M9 20a7 7 0 0 0 14 0M8 17h3M21 17h3" stroke="#0E7C7B" strokeWidth="2.2" strokeLinecap="round" />
           </svg>
-          <div>
-            <h1 className="display" style={{ fontSize: 22, lineHeight: 1 }}>Harbor</h1>
+          <div style={{ flex: 1 }}>
+            <h1 className="display" style={{ fontSize: 22, lineHeight: 1 }}>Harnon</h1>
             <div className="eyebrow" style={{ marginTop: 3 }}>Résumé in · matches out · applications ready</div>
           </div>
+          {availableModels.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span className="eyebrow" style={{ margin: 0 }}>Model</span>
+              <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}
+                style={{ font: "inherit", fontSize: 13, fontWeight: 600, color: "var(--ink)",
+                  background: "#fff", border: "1px solid var(--line)", borderRadius: 9,
+                  padding: "7px 10px", outline: "none", cursor: "pointer", maxWidth: 220 }}>
+                {availableModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}{m.free ? " (free)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </header>
+
+        {currentModel.id && !currentModel.webSearch && (
+          <div style={{ background: "var(--signal-050)", border: "1px solid #ECD8A7", borderRadius: 10,
+            padding: "8px 14px", fontSize: 12.5, color: "var(--warn)", marginBottom: 6 }}>
+            <strong>{currentModel.label}</strong> is free but doesn't support live web search — job listings
+            come from the model's training data and can't be verified as still open. Switch to a Claude model
+            for live search and verification.
+          </div>
+        )}
 
         {/* stepper */}
         <div className="steps">
@@ -609,8 +659,9 @@ export default function App() {
                             {job.location}{job.remote ? " · Remote" : ""}{job.salary ? " · " + job.salary : ""}
                             {job.source ? " · " + job.source : ""}
                           </div>
-                          <div style={{ fontSize: 12, color: "var(--good)", fontWeight: 600, marginTop: 4 }}>
-                            ✓ Confirmed open{job.checkedNote ? " · " + job.checkedNote : ""}
+                          <div style={{ fontSize: 12, color: job.status === "open" ? "var(--good)" : "var(--warn)", fontWeight: 600, marginTop: 4 }}>
+                            {job.status === "open" ? "✓ Confirmed open" : "◐ Unverified (no live search)"}
+                            {job.checkedNote && job.status === "open" ? " · " + job.checkedNote : ""}
                           </div>
                         </div>
                         <div style={{ textAlign: "right", flex: "none" }}>
