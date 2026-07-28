@@ -4,4 +4,4 @@ dist/
 *.log
 .env
 .DS_Store
-harbor-autoapply/node_modules/
+harnon-autoapply/node_modules/

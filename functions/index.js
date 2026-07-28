@@ -1,6 +1,6 @@
 /*
   Harnon backend — multi-provider LLM proxy.
-  
+
   Supports Anthropic Claude (paid, with web search), Groq (free tier),
   and Google Gemini (free tier). Keys are stored as Firebase secrets.
   The /api/models endpoint tells the frontend which providers are configured.
@@ -20,6 +20,8 @@ const GROQ_API_KEY      = defineSecret("GROQ_API_KEY");
 const GEMINI_API_KEY    = defineSecret("GEMINI_API_KEY");
 
 const ALL_SECRETS = [ANTHROPIC_API_KEY, GROQ_API_KEY, GEMINI_API_KEY];
+
+const DEFAULT_MODEL = "claude-sonnet-5";
 
 // ──────────────────────── Provider configs ────────────────────────
 
@@ -57,11 +59,75 @@ function providerFor(modelId) {
   return null;
 }
 
+function modelInfo(modelId) {
+  for (const cfg of Object.values(PROVIDERS)) {
+    const m = cfg.models.find((x) => x.id === modelId);
+    if (m) return m;
+  }
+  return null;
+}
+
+// ──────────────────────── Abuse guards ────────────────────────
+// Origin allowlist + a best-effort in-memory rate limiter. This deters casual
+// scripted abuse and drive-by/browser-based hits against the shared Anthropic
+// key. It is NOT a substitute for real attestation: a targeted attacker can
+// spoof the Origin header with a direct HTTP client. If this app is ever
+// opened up broadly, add Firebase App Check for real request attestation and
+// consider per-user auth instead of a single shared key.
+
+const ALLOWED_ORIGINS = new Set([
+  "https://harnor.web.app",
+  "https://harnor.firebaseapp.com",
+  "http://localhost:5173",
+  "http://localhost:5000",
+  "http://127.0.0.1:5000",
+]);
+
+const MAX_CONTENT_CHARS = 8_000_000; // generous ceiling: a multi-page PDF resume as base64 + prompt text
+const MAX_SYSTEM_CHARS = 20_000;
+const HARD_MAX_TOKENS = 4096;
+
+// Best-effort per-instance limiter (Cloud Functions instances are ephemeral and
+// can scale to N copies, so this bounds abuse per warm instance, not globally).
+const RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
+const RATE_LIMIT_MAX = 40;
+const hitLog = new Map(); // ip -> [timestamps]
+
+function clientIp(req) {
+  const fwd = req.headers["x-forwarded-for"];
+  if (typeof fwd === "string" && fwd.length) return fwd.split(",")[0].trim();
+  return req.ip || "unknown";
+}
+
+function isRateLimited(req) {
+  const ip = clientIp(req);
+  const now = Date.now();
+  const recent = (hitLog.get(ip) || []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+  recent.push(now);
+  hitLog.set(ip, recent);
+  if (hitLog.size > 5000) hitLog.clear(); // crude memory guard for a long-lived warm instance
+  return recent.length > RATE_LIMIT_MAX;
+}
+
+// Applies CORS headers when the request's Origin is allowlisted. Returns
+// whether the origin was allowed so callers can reject disallowed requests.
+function applyCors(req, res) {
+  const origin = req.headers.origin;
+  const allowed = !!origin && ALLOWED_ORIGINS.has(origin);
+  if (allowed) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type");
+  return allowed;
+}
+
 // ──────────────────────── Anthropic call ────────────────────────
 
 async function callAnthropic(key, { system, content, tools, max_tokens, model }) {
   const body = {
-    model: model || "claude-sonnet-5",
+    model: model || DEFAULT_MODEL,
     max_tokens: max_tokens || 4096,
     messages: [{ role: "user", content }],
   };
@@ -133,10 +199,12 @@ async function callGemini(key, { system, content, max_tokens, model }) {
 // ──────────────────────── /api/models ────────────────────────
 
 exports.models = onRequest(
-  { secrets: ALL_SECRETS, cors: true },
+  { secrets: ALL_SECRETS, cors: false },
   async (req, res) => {
-    res.set("Access-Control-Allow-Origin", "*");
+    const allowed = applyCors(req, res);
     if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+    if (!allowed) { res.status(403).json({ error: "Origin not allowed." }); return; }
+    if (isRateLimited(req)) { res.status(429).json({ error: "Too many requests. Try again shortly." }); return; }
 
     const available = [];
     const tryKey = (secret) => { try { return secret.value(); } catch (_) { return ""; } };
@@ -157,44 +225,72 @@ exports.models = onRequest(
 // ──────────────────────── /api/llm (main proxy) ────────────────────────
 
 exports.llm = onRequest(
-  { secrets: ALL_SECRETS, timeoutSeconds: 300, memory: "512MiB", cors: true },
+  { secrets: ALL_SECRETS, timeoutSeconds: 300, memory: "512MiB", cors: false },
   async (req, res) => {
-    res.set("Access-Control-Allow-Origin", "*");
-    res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.set("Access-Control-Allow-Headers", "Content-Type");
+    const allowed = applyCors(req, res);
     if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+    if (!allowed) { res.status(403).json({ error: "Origin not allowed." }); return; }
     if (req.method !== "POST") { res.status(405).json({ error: "Use POST." }); return; }
+    if (isRateLimited(req)) { res.status(429).json({ error: "Too many requests. Please slow down and try again shortly." }); return; }
 
     try {
-      const { system, content, tools, max_tokens, model } = req.body || {};
+      const body = req.body || {};
+      const { system, content, tools } = body;
       if (!content) { res.status(400).json({ error: "Missing 'content'." }); return; }
 
+      // Validate/clamp everything the client controls before it reaches a
+      // paid provider — the client should never be able to pick an unknown
+      // model, force on web search, or request an unbounded token budget.
+      const model = typeof body.model === "string" && body.model ? body.model : DEFAULT_MODEL;
+      const prov = providerFor(model);
+      if (!prov) { res.status(400).json({ error: "Unknown model." }); return; }
+
+      const contentSize = JSON.stringify(content).length;
+      if (contentSize > MAX_CONTENT_CHARS) { res.status(413).json({ error: "Request too large." }); return; }
+      if (system && String(system).length > MAX_SYSTEM_CHARS) { res.status(413).json({ error: "System prompt too large." }); return; }
+
+      const max_tokens = Math.min(Number(body.max_tokens) || 4096, HARD_MAX_TOKENS);
+
+      // Only forward the exact known web_search tool, and only for models
+      // that actually support it — the client's `tools` value is a request,
+      // not a grant.
+      let safeTools;
+      if (Array.isArray(tools) && tools.length) {
+        const info = modelInfo(model);
+        const isKnownSearchTool = (t) => t && t.type === "web_search_20250305" && t.name === "web_search";
+        if (info && info.webSearch && tools.every(isKnownSearchTool)) safeTools = tools;
+      }
+
       const tryKey = (secret) => { try { return secret.value(); } catch (_) { return ""; } };
-      const prov = providerFor(model || "");
 
       let data;
       if (prov === "groq" && tryKey(GROQ_API_KEY)) {
         data = await callGroq(tryKey(GROQ_API_KEY), { system, content, max_tokens, model });
       } else if (prov === "gemini" && tryKey(GEMINI_API_KEY)) {
         data = await callGemini(tryKey(GEMINI_API_KEY), { system, content, max_tokens, model });
+      } else if (prov === "anthropic" && tryKey(ANTHROPIC_API_KEY)) {
+        data = await callAnthropic(tryKey(ANTHROPIC_API_KEY), { system, content, tools: safeTools, max_tokens, model });
       } else if (tryKey(ANTHROPIC_API_KEY)) {
-        // Default / Claude — also used when no specific model is set
-        data = await callAnthropic(tryKey(ANTHROPIC_API_KEY), { system, content, tools, max_tokens, model: model || "claude-sonnet-5" });
+        // Requested provider's key isn't configured — fall back to Anthropic.
+        data = await callAnthropic(tryKey(ANTHROPIC_API_KEY), { system, content, tools: safeTools, max_tokens, model: DEFAULT_MODEL });
       } else if (tryKey(GROQ_API_KEY)) {
-        // Fallback: no Anthropic key, use Groq
         data = await callGroq(tryKey(GROQ_API_KEY), { system, content, max_tokens, model: "llama-3.3-70b-versatile" });
       } else if (tryKey(GEMINI_API_KEY)) {
-        // Fallback: no Anthropic or Groq, use Gemini
         data = await callGemini(tryKey(GEMINI_API_KEY), { system, content, max_tokens, model: "gemini-2.5-flash" });
       } else {
         res.status(500).json({ error: "No API keys configured. Set at least one: ANTHROPIC_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY." });
         return;
       }
 
-      if (data.error) { res.status(502).json(data); return; }
+      if (data.error) {
+        console.error("Provider error for model " + model + ":", JSON.stringify(data.error));
+        res.status(502).json({ error: "The AI provider request failed. Please try again." });
+        return;
+      }
       res.json(data);
     } catch (e) {
-      res.status(500).json({ error: String((e && e.message) || e) });
+      console.error("Unhandled /api/llm error:", e);
+      res.status(500).json({ error: "Something went wrong processing that request. Please try again." });
     }
   }
 );

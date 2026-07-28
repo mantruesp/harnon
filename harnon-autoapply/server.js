@@ -1,7 +1,7 @@
 /*
-  Harbor auto-apply helper (LOCAL ONLY)
+  Harnon auto-apply helper (LOCAL ONLY)
   -------------------------------------
-  Runs on your machine. Harbor (in the browser) pings this server; when it's up,
+  Runs on your machine. Harnon (in the browser) pings this server; when it's up,
   an "Auto-apply in Chromium" button appears. Clicking it sends the job + your
   profile here, and this opens a REAL Chromium window, navigates to the posting,
   and fills the fields it can recognize.
@@ -24,22 +24,45 @@ const http = require("http");
 const { chromium } = require("playwright");
 
 const PORT = 8787;
+const HOST = "127.0.0.1"; // never bind beyond localhost — this drives a real browser
 const RESUME_PATH = process.env.RESUME_PATH || "";
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+// Only the app itself (not just "any website you happen to have open") should
+// be able to reach this and drive your Chromium. A wildcard origin here would
+// let ANY page you visit silently POST /apply and open a browser on your
+// machine. Add to this list only if you're running Harnon from another origin.
+const ALLOWED_ORIGINS = new Set([
+  "https://harnor.web.app",
+  "https://harnor.firebaseapp.com",
+  "http://localhost:5173",
+  "http://localhost:5000",
+  "http://127.0.0.1:5000",
+]);
+
+function cors(req, res) {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Allow-Private-Network", "true");
+  return !!origin && ALLOWED_ORIGINS.has(origin);
 }
 
 const server = http.createServer((req, res) => {
-  cors(res);
+  const originOk = cors(req, res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+  if (!originOk) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "Origin not allowed." }));
+    return;
+  }
 
   if (req.method === "GET" && req.url === "/ping") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, app: "harbor-autoapply", version: 1 }));
+    res.end(JSON.stringify({ ok: true, app: "harnon-autoapply", version: 1 }));
     return;
   }
 
@@ -64,10 +87,10 @@ const server = http.createServer((req, res) => {
   res.end(JSON.stringify({ ok: false, error: "Not found" }));
 });
 
-server.listen(PORT, () => {
-  console.log("Harbor auto-apply helper running at http://localhost:" + PORT);
+server.listen(PORT, HOST, () => {
+  console.log("Harnon auto-apply helper running at http://" + HOST + ":" + PORT);
   console.log(RESUME_PATH ? "Resume to attach: " + RESUME_PATH : "No RESUME_PATH set — file uploads will be skipped.");
-  console.log("Leave this running, then use the Auto-apply button in Harbor.");
+  console.log("Leave this running, then use the Auto-apply button in Harnon.");
 });
 
 async function autoApply(job, profile) {

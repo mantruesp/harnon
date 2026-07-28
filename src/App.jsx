@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { saveResume, loadResumeRecord } from "./storage.js";
 
 /* ============================================================
-   Harbor — résumé in, matches out, applications ready.
+   Harnon — résumé in, matches out, applications ready.
    A working tool: it reads your resume, searches the live web
    for matching US roles, flags visa sponsorship, and drafts
    tailored application materials. All AI work runs through the
@@ -21,7 +21,7 @@ const STYLE = `
   --radius:16px;
 }
 *{box-sizing:border-box}
-.harbor{font-family:'Inter',system-ui,-apple-system,sans-serif;color:var(--ink);
+.harnon{font-family:'Inter',system-ui,-apple-system,sans-serif;color:var(--ink);
   background:radial-gradient(120% 80% at 50% -10%,#F3F7F6 0%,var(--bg) 60%);min-height:100vh;
   -webkit-font-smoothing:antialiased;}
 .display{font-family:'Space Grotesk','Inter',sans-serif;letter-spacing:-.01em}
@@ -95,6 +95,39 @@ a.rawlink{word-break:break-all}
 const API = "/api/claude";
 
 /* ---- helpers ---- */
+
+// When a model hits its token limit mid-array, salvage whatever complete
+// top-level elements came through instead of discarding the whole batch —
+// e.g. 4 of 6 job listings is still useful, and previously a single truncated
+// batch would throw and abort the entire multi-batch search loop.
+function salvageJsonArray(t) {
+  const start = t.indexOf("[");
+  if (start === -1) return null;
+  let depth = 0, inStr = false, esc = false, lastSafe = -1, closedFully = false;
+  for (let i = start; i < t.length; i++) {
+    const c = t[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === "[" || c === "{") { depth++; continue; }
+    if (c === "]" || c === "}") {
+      depth--;
+      if (depth === 1) lastSafe = i + 1;
+      else if (depth === 0) { lastSafe = i + 1; closedFully = true; break; }
+    }
+  }
+  if (lastSafe === -1) return null;
+  const candidate = closedFully ? t.slice(start, lastSafe) : t.slice(start, lastSafe) + "]";
+  try {
+    const parsed = JSON.parse(candidate);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch (e) { return null; }
+}
+
 function extractJson(raw) {
   if (!raw) throw new Error("Claude returned an empty response.");
   let t = raw.trim().replace(/^```(?:json)?/i, "").replace(/```$/g, "").trim();
@@ -105,8 +138,14 @@ function extractJson(raw) {
   else { start = oi; close = "}"; }
   if (start === -1) throw new Error("Couldn't find structured data in the response.");
   const end = t.lastIndexOf(close);
-  if (end === -1 || end < start) throw new Error("The response was cut off. Try again.");
-  return JSON.parse(t.slice(start, end + 1));
+  if (end !== -1 && end > start) {
+    try { return JSON.parse(t.slice(start, end + 1)); } catch (e) {}
+  }
+  if (close === "]") {
+    const salvaged = salvageJsonArray(t);
+    if (salvaged && salvaged.length) return salvaged;
+  }
+  throw new Error("The response was cut off. Try again.");
 }
 
 async function callClaude({ system, content, tools, maxTokens = 4096, model }) {
@@ -134,7 +173,7 @@ function makeId() {
   const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no ambiguous I/L/O/0/1
   let s = "";
   for (let i = 0; i < 5; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return "HRB-" + s;
+  return "HRN-" + s;
 }
 
 function MatchRing({ score }) {
@@ -173,6 +212,51 @@ function Toggle({ on, set, label, hint }) {
   );
 }
 
+function JobCard({ job, onPrepare, muted }) {
+  return (
+    <div className="job" style={muted ? { opacity: 0.82 } : undefined}>
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+        <MatchRing score={job.matchScore} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <div>
+              <h3 className="display" style={{ fontSize: 16 }}>{job.title}</h3>
+              <div style={{ fontSize: 13.5, color: "var(--ink)", fontWeight: 600 }}>{job.company}</div>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
+                {job.location}{job.remote ? " · Remote" : ""}{job.salary ? " · " + job.salary : ""}
+                {job.source ? " · " + job.source : ""}
+              </div>
+              <div style={{ fontSize: 12, color: job.status === "open" ? "var(--good)" : "var(--warn)", fontWeight: 600, marginTop: 4 }}>
+                {job.status === "open" ? "✓ Confirmed open" : job.status === "unconfirmed" ? "◐ Not confirmed open" : "◐ Unverified (no live search)"}
+                {job.checkedNote ? " · " + job.checkedNote : ""}
+              </div>
+            </div>
+            <div style={{ textAlign: "right", flex: "none" }}>
+              <VisaPill status={job.visaSponsorship} />
+              {job.visaNote && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>{job.visaNote}</div>}
+            </div>
+          </div>
+          {job.matchReasons?.length > 0 && (
+            <ul style={{ margin: "10px 0 0", paddingLeft: 16, fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
+              {job.matchReasons.slice(0, 3).map((r, j) => <li key={j}>{r}</li>)}
+            </ul>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <button className="btn btn-primary btn-sm" onClick={() => onPrepare(job)}>
+              Prepare application
+            </button>
+            {job.postingUrl && (
+              <a className="btn btn-ghost btn-sm" href={job.postingUrl} target="_blank" rel="noopener noreferrer">
+                View posting ↗
+              </a>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [stage, setStage] = useState(1); // 1 resume, 2 matches, 3 apply
   const [resumeText, setResumeText] = useState("");
@@ -185,8 +269,12 @@ export default function App() {
   const [location, setLocation] = useState("United States");
   const [jobs, setJobs] = useState(null);
   const [hiddenCount, setHiddenCount] = useState(0);
+  const [unconfirmedJobs, setUnconfirmedJobs] = useState([]);
+  const [showUnconfirmed, setShowUnconfirmed] = useState(false);
+  const uncRef = useRef([]);
   const [searching, setSearching] = useState(false);
   const [searchPhase, setSearchPhase] = useState(""); // "" | "searching" | "verifying"
+  const [batchProgress, setBatchProgress] = useState({ n: 0, max: 0 });
 
   const [savedId, setSavedId] = useState("");
   const [idInput, setIdInput] = useState("");
@@ -225,7 +313,12 @@ export default function App() {
       .then((d) => {
         const list = d.models || [];
         setAvailableModels(list);
-        if (list.length > 0 && !selectedModel) setSelectedModel(list[0].id);
+        if (list.length > 0 && !selectedModel) {
+          // Default to Sonnet — the best cost/capability balance with live
+          // search — regardless of the order /api/models happens to return.
+          const preferred = list.find((m) => m.id === "claude-sonnet-5") || list[0];
+          setSelectedModel(preferred.id);
+        }
       })
       .catch(() => {});
   }, []);
@@ -245,14 +338,21 @@ export default function App() {
 
   const hasResume = resumePdf || resumeText.trim().length > 40;
 
+  // Prefer the already-extracted plain text over resending the raw PDF —
+  // once analyzeResume has extracted resumeText once, every later call
+  // (e.g. one per "Prepare application" click) reuses the cheap text form
+  // instead of re-sending the full PDF document each time.
   function resumeContent(instruction) {
+    if (resumeText.trim()) {
+      return instruction + "\n\n--- RESUME TEXT ---\n" + resumeText;
+    }
     if (resumePdf) {
       return [
         { type: "document", source: { type: "base64", media_type: "application/pdf", data: resumePdf.data } },
         { type: "text", text: instruction },
       ];
     }
-    return instruction + "\n\n--- RESUME TEXT ---\n" + resumeText;
+    return instruction;
   }
 
   function onFile(e) {
@@ -275,6 +375,10 @@ export default function App() {
   async function analyzeResume() {
     setError(""); setAnalyzing(true); setAnalysis(null);
     try {
+      // Only ask the model to transcribe the resume when we don't already
+      // have plain text (i.e. a PDF was uploaded) — when text was pasted,
+      // re-generating it as output is pure wasted tokens on every analysis.
+      const needsTranscript = !resumeText.trim();
       const instruction =
         "You are a senior technical recruiter and resume coach. Review this resume for a US job search. " +
         "Respond with ONLY one valid JSON object, no markdown, no commentary. Schema:\n" +
@@ -283,9 +387,9 @@ export default function App() {
         '"score":number(0-100),"summary":string,' +
         '"strengths":[string],' +
         '"improvements":[{"issue":string,"fix":string}],' +
-        '"atsKeywords":[string],' +
-        '"resumeText":string(the full resume as clean plain text, so it can be reused later)}';
-      const text = await callClaude({ content: resumeContent(instruction), maxTokens: 4096, model: selectedModel });
+        '"atsKeywords":[string]' +
+        (needsTranscript ? ',"resumeText":string(the full resume as clean plain text, so it can be reused later)}' : "}");
+      const text = await callClaude({ content: resumeContent(instruction), maxTokens: needsTranscript ? 4096 : 2048, model: selectedModel });
       const parsed = extractJson(text);
       const rt = resumeText.trim() ? resumeText : (parsed.resumeText || "");
       if (!resumeText.trim() && parsed.resumeText) setResumeText(parsed.resumeText);
@@ -327,8 +431,12 @@ export default function App() {
         : "") +
       (remote ? "Prefer remote or hybrid roles. " : "") +
       "Location focus: " + (location || "United States") + ". ";
+    // Only hint the most recent keys — we still hard-dedupe every candidate
+    // against the full accumulator client-side, so this list only needs to
+    // steer the model, not guarantee uniqueness. Keeping it short saves
+    // meaningfully on repeated input tokens across up to 14 batches.
     const exclude = knownKeys.length
-      ? "Do NOT repeat any of these already-found roles: " + knownKeys.slice(-40).join("; ") + ". Find DIFFERENT postings. "
+      ? "Do NOT repeat any of these already-found roles: " + knownKeys.slice(-15).join("; ") + ". Find DIFFERENT postings. "
       : "";
     const instruction =
       "Use web search to find 6 real, currently-open job postings in the United States that match this candidate. " +
@@ -356,7 +464,7 @@ export default function App() {
   async function verifyBatch(cands) {
     // Without web search we can't verify live — pass all through as unverified
     if (!hasWebSearch) {
-      return { openOnes: cands.map((j) => ({ ...j, status: "unverified", checkedNote: "No live search on this model" })), hidden: 0 };
+      return { openOnes: cands.map((j) => ({ ...j, status: "unverified", checkedNote: "No live search on this model" })), unconfirmedOnes: [], hidden: 0 };
     }
     const today = new Date().toISOString().slice(0, 10);
     const verifyInstruction =
@@ -382,13 +490,15 @@ export default function App() {
     const byKey = {};
     verified.forEach((v) => { byKey[jobKey(v)] = v; });
     const openOnes = [];
+    const unconfirmedOnes = [];
     let hidden = 0;
     cands.forEach((j) => {
-      const v = byKey[jobKey(j)] || {};
-      if (v.status === "open") openOnes.push({ ...j, status: "open", checkedNote: v.checkedNote || "" });
-      else hidden++;
+      const v = byKey[jobKey(j)];
+      if (v && v.status === "open") openOnes.push({ ...j, status: "open", checkedNote: v.checkedNote || "" });
+      else if (v && v.status === "closed") hidden++; // confirmed no longer accepting applications — genuinely not worth showing
+      else unconfirmedOnes.push({ ...j, status: "unconfirmed", checkedNote: (v && v.checkedNote) || "Couldn't confirm this is still open." });
     });
-    return { openOnes, hidden };
+    return { openOnes, unconfirmedOnes, hidden };
   }
 
   // Streams results in: keeps searching + verifying batches, appending, until targetCount confirmed-open.
@@ -400,8 +510,10 @@ export default function App() {
     if (acc.length === 0) setJobs([]); // render the results section immediately
     let emptyStreak = 0, batches = 0;
     const MAX_BATCHES = 14;
+    setBatchProgress({ n: 0, max: MAX_BATCHES });
     while (acc.length < targetCount && batches < MAX_BATCHES && !stopRef.current) {
       batches++;
+      setBatchProgress({ n: batches, max: MAX_BATCHES });
       setSearchPhase("searching");
       let cand;
       try { cand = await searchBatch(acc.map(jobKey)); }
@@ -410,10 +522,18 @@ export default function App() {
       cand = (cand || []).filter((c) => !acc.some((a) => jobKey(a) === jobKey(c)));
       if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
       setSearchPhase("verifying");
-      const { openOnes, hidden } = await verifyBatch(cand);
+      const { openOnes, unconfirmedOnes, hidden } = await verifyBatch(cand);
       if (stopRef.current) break;
       const before = acc.length;
       openOnes.forEach((o) => { if (!acc.some((a) => jobKey(a) === jobKey(o))) acc.push(o); });
+      if (unconfirmedOnes && unconfirmedOnes.length) {
+        unconfirmedOnes.forEach((u) => {
+          if (!acc.some((a) => jobKey(a) === jobKey(u)) && !uncRef.current.some((x) => jobKey(x) === jobKey(u))) {
+            uncRef.current.push(u);
+          }
+        });
+        setUnconfirmedJobs([...uncRef.current]);
+      }
       if (hidden) setHiddenCount((h) => h + hidden);
       if (acc.length === before) { emptyStreak++; if (emptyStreak >= 2) break; }
       else { emptyStreak = 0; acc.sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0)); setJobs([...acc]); setStage(3); }
@@ -423,7 +543,7 @@ export default function App() {
     setSearching(false); setSearchPhase("");
   }
 
-  function startSearch() { setJobs([]); setHiddenCount(0); runBatches(20, []); }
+  function startSearch() { setJobs([]); setHiddenCount(0); uncRef.current = []; setUnconfirmedJobs([]); setShowUnconfirmed(false); runBatches(20, []); }
   function loadMore() { runBatches((jobs ? jobs.length : 0) + 20, jobs || []); }
   function stopSearch() { stopRef.current = true; }
 
@@ -470,7 +590,7 @@ export default function App() {
   }
 
   return (
-    <div className="harbor">
+    <div className="harnon">
       <div className="wrap">
         {/* header */}
         <header style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4, flexWrap: "wrap" }}>
@@ -525,14 +645,17 @@ export default function App() {
         {/* Returning user — load by ID */}
         <div className="card" style={{ padding: "14px 18px", marginBottom: 18, display: "flex",
           gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <span className="eyebrow" style={{ flex: "none" }}>Been here before?</span>
+          <span className="eyebrow" style={{ flex: "none" }}>Used Harnon on this device before?</span>
           <input type="text" value={idInput} onChange={(e) => setIdInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") loadById(); }}
-            placeholder="Enter your Harbor ID (e.g. HRB-K7M2P)"
+            placeholder="Enter your Harnon ID (e.g. HRN-K7M2P)"
             style={{ flex: "1 1 200px", maxWidth: 320, textTransform: "uppercase" }} />
           <button className="btn btn-ghost btn-sm" disabled={loadingId || !idInput.trim()} onClick={loadById}>
             {loadingId ? <><span className="spin spin-ink" /> Loading…</> : "Load my resume"}
           </button>
+          <span style={{ fontSize: 11.5, color: "var(--muted)", flexBasis: "100%" }}>
+            Saved resumes live only in this browser's storage — an ID won't work on a different device or browser.
+          </span>
         </div>
 
         {/* STEP 1 — resume */}
@@ -540,7 +663,7 @@ export default function App() {
           <div className="eyebrow">Step 1 — Your resume</div>
           <h2 className="display" style={{ fontSize: 18, margin: "6px 0 4px" }}>Add your resume</h2>
           <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "0 0 16px" }}>
-            Upload a PDF or paste the text. Harbor reads it to understand your background and find real matches.
+            Upload a PDF or paste the text. Harnon reads it to understand your background and find real matches.
           </p>
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
@@ -574,7 +697,7 @@ export default function App() {
                 <span className="mono" style={{ fontWeight: 700, color: "var(--primary-600)", fontSize: 14 }}>{savedId}</span>
                 <button className="btn btn-ghost btn-sm" style={{ padding: "4px 10px" }}
                   onClick={() => navigator.clipboard?.writeText(savedId)}>Copy ID</button>
-                <span style={{ fontSize: 12, color: "var(--muted)" }}>Enter this next time to skip the upload.</span>
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>Enter this next time on this browser to skip the upload — it isn't stored on a server, so it won't follow you to another device.</span>
               </div>
             )}
             <div className="eyebrow">Step 2 — Review & matches</div>
@@ -618,13 +741,22 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{ marginTop: 18 }}>
+            <div style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
               <button className="btn btn-primary" disabled={searching} onClick={startSearch}>
                 {searching
                   ? <><span className="spin" /> {searchPhase === "verifying" ? "Checking postings are still open…" : "Searching live listings…"}</>
                   : "Find matching jobs →"}
               </button>
-              {searching && <span style={{ fontSize: 12.5, color: "var(--muted)", marginLeft: 12 }}>Loading 5 at a time up to 20 — results appear below as they're confirmed.</span>}
+              {searching && (
+                <>
+                  <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                    Batch {batchProgress.n} of up to {batchProgress.max}, loading 5 at a time up to 20{
+                      hasWebSearch ? " — each batch spends a couple of live-search calls" : ""
+                    }.
+                  </span>
+                  <button className="btn btn-ghost btn-sm" onClick={stopSearch}>Stop</button>
+                </>
+              )}
             </div>
           </section>
         )}
@@ -636,65 +768,25 @@ export default function App() {
               Step 3 — {jobs.length} confirmed open{searching ? " · finding more…" : " · apply"}
             </div>
             {jobs.length === 0 && searching && (
-              <div className="card" style={{ padding: 20, fontSize: 14, display: "flex", alignItems: "center", gap: 10 }}>
-                <span className="spin spin-ink" /> Searching and verifying the first roles…
+              <div className="card" style={{ padding: 20, fontSize: 14, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span className="spin spin-ink" /> Searching and verifying the first roles… (batch {batchProgress.n} of up to {batchProgress.max})
+                <button className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }} onClick={stopSearch}>Stop</button>
               </div>
             )}
             {jobs.length === 0 && !searching && (
               <div className="card" style={{ padding: 20, fontSize: 14 }}>
-                Nothing came back that we could confirm is still open{hiddenCount > 0 ? " (" + hiddenCount + " couldn't be verified and were hidden)" : ""}. Try turning off the visa filter or broadening the location, then search again.
+                Nothing came back that we could confirm is still open{hiddenCount > 0 ? " (" + hiddenCount + " confirmed closed and left out)" : ""}. Try turning off the visa filter or broadening the location, then search again.
               </div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {jobs.map((job, i) => (
-                <div className="job" key={i}>
-                  <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
-                    <MatchRing score={job.matchScore} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                        <div>
-                          <h3 className="display" style={{ fontSize: 16 }}>{job.title}</h3>
-                          <div style={{ fontSize: 13.5, color: "var(--ink)", fontWeight: 600 }}>{job.company}</div>
-                          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
-                            {job.location}{job.remote ? " · Remote" : ""}{job.salary ? " · " + job.salary : ""}
-                            {job.source ? " · " + job.source : ""}
-                          </div>
-                          <div style={{ fontSize: 12, color: job.status === "open" ? "var(--good)" : "var(--warn)", fontWeight: 600, marginTop: 4 }}>
-                            {job.status === "open" ? "✓ Confirmed open" : "◐ Unverified (no live search)"}
-                            {job.checkedNote && job.status === "open" ? " · " + job.checkedNote : ""}
-                          </div>
-                        </div>
-                        <div style={{ textAlign: "right", flex: "none" }}>
-                          <VisaPill status={job.visaSponsorship} />
-                          {job.visaNote && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>{job.visaNote}</div>}
-                        </div>
-                      </div>
-                      {job.matchReasons?.length > 0 && (
-                        <ul style={{ margin: "10px 0 0", paddingLeft: 16, fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
-                          {job.matchReasons.slice(0, 3).map((r, j) => <li key={j}>{r}</li>)}
-                        </ul>
-                      )}
-                      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                        <button className="btn btn-primary btn-sm" onClick={() => prepareApplication(job)}>
-                          Prepare application
-                        </button>
-                        {job.postingUrl && (
-                          <a className="btn btn-ghost btn-sm" href={job.postingUrl} target="_blank" rel="noopener noreferrer">
-                            View posting ↗
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
+              {jobs.map((job, i) => <JobCard key={i} job={job} onPrepare={prepareApplication} />)}
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14, flexWrap: "wrap" }}>
               {searching && jobs.length > 0 && (
                 <>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--muted)" }}>
-                    <span className="spin spin-ink" /> Finding more roles ({jobs.length} so far)…
+                    <span className="spin spin-ink" /> Finding more roles ({jobs.length} so far · batch {batchProgress.n}/{batchProgress.max})…
                   </span>
                   <button className="btn btn-ghost btn-sm" onClick={stopSearch}>Stop</button>
                 </>
@@ -704,11 +796,27 @@ export default function App() {
               )}
             </div>
 
+            {unconfirmedJobs.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <button className="btn btn-ghost btn-sm" onClick={() => setShowUnconfirmed((s) => !s)}>
+                  {showUnconfirmed ? "Hide" : "Show"} {unconfirmedJobs.length} unconfirmed match{unconfirmedJobs.length > 1 ? "es" : ""} {showUnconfirmed ? "▴" : "▾"}
+                </button>
+                <p style={{ fontSize: 11.5, color: "var(--muted)", margin: "6px 0 0" }}>
+                  These looked like real matches but a live check couldn't confirm they're still accepting applications — worth a manual look rather than discarding.
+                </p>
+                {showUnconfirmed && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+                    {unconfirmedJobs.map((job, i) => <JobCard key={i} job={job} onPrepare={prepareApplication} muted />)}
+                  </div>
+                )}
+              </div>
+            )}
+
             <p style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12 }}>
               {jobs.length > 0 && hiddenCount > 0 && (
-                <>Hid {hiddenCount} listing{hiddenCount > 1 ? "s" : ""} we couldn't confirm were still open. </>
+                <>Left out {hiddenCount} listing{hiddenCount > 1 ? "s" : ""} confirmed no longer accepting applications. </>
               )}
-              Only roles verified as currently open are shown, but postings can close at any time — reconfirm on the employer's site before applying.
+              Roles above are verified as currently open, but postings can close at any time — reconfirm on the employer's site before applying.
             </p>
           </section>
         )}
@@ -778,7 +886,7 @@ export default function App() {
                       </div>
                     )}
                     <p style={{ fontSize: 11.5, color: "var(--muted)", margin: 0 }}>
-                      Harbor drafts everything for you. Auto-apply fills the form in a real Chromium and then stops so you can review and submit yourself — job portals need your login, and it never solves CAPTCHAs or submits blindly.
+                      Harnon drafts everything for you. Auto-apply fills the form in a real Chromium and then stops so you can review and submit yourself — job portals need your login, and it never solves CAPTCHAs or submits blindly.
                     </p>
                   </div>
                 )}
@@ -788,7 +896,7 @@ export default function App() {
         )}
 
         <footer style={{ textAlign: "center", marginTop: 40, fontSize: 11.5, color: "var(--muted)" }}>
-          Harbor uses live web search — verify details before applying.
+          Harnon uses live web search — verify details before applying.
         </footer>
       </div>
     </div>

@@ -21,7 +21,7 @@ harnon/
 │   └── index.js                   Cloud Function: multi-provider proxy
 ├── firebase.json                  hosting + /api rewrites + SPA fallback
 ├── .firebaserc                    your Firebase project id goes here
-└── harbor-autoapply/              optional local Chromium auto-fill helper
+└── harnon-autoapply/              optional local Chromium auto-fill helper
 ```
 
 ## Supported models
@@ -106,9 +106,9 @@ go in GitHub secrets. They're already there from the one-time setup step.
 
 ## Optional: auto-apply helper
 
-`harbor-autoapply/` is a separate local program (Node + Playwright) that opens a
+`harnon-autoapply/` is a separate local program (Node + Playwright) that opens a
 real Chromium and fills application forms from your profile. It runs on your
-machine, not on Firebase. See `harbor-autoapply/README.md`. Once it's running,
+machine, not on Firebase. See `harnon-autoapply/README.md`. Once it's running,
 an **Auto-apply** button appears in Harnon.
 
 ## Notes & limits
