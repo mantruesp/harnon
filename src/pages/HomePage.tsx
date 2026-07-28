@@ -210,7 +210,7 @@ export default function HomePage({ autoLoadId }: { autoLoadId?: string }) {
               {jobSearch.searching && (
                 <>
                   <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
-                    Batch {jobSearch.batchProgress.n} of up to {jobSearch.batchProgress.max}, loading 5 at a time up to 20{
+                    Batch {jobSearch.batchProgress.n} of up to {jobSearch.batchProgress.max}, checking up to 10 real links at a time up to 20{
                       models.hasWebSearch ? " — each batch spends a couple of live-search calls" : ""
                     }.
                   </span>

@@ -333,6 +333,58 @@ resume-to-ID save/"Copy link", and the batched job-search loop (batch
 progress, Stop control) all rendered and behaved identically to the
 pre-rewrite version.
 
+### 0.7 Search process redesign: require a positively-confirmed link, tune yield to compensate
+
+Owner requested a deliberately stricter redefinition of "good search result":
+a job only counts if the model found a link **and** that link is positively
+confirmed reachable — not merely "not proven dead." Two explicit decisions
+behind this:
+1. `ok:null` (inconclusive — blocked by bot detection, timeout, or the check
+   itself failing) no longer passes. Only `ok:true` (HTTP 2xx/3xx) does.
+2. The search prompt stays general (no hardcoded list of job sites) — the
+   model still decides where to search based on the candidate profile.
+
+**Changes:**
+- `useJobSearch.ts` `runBatches`: the link-check filter changed from
+  excluding `ok:false` to *requiring* `ok:true` — `cand.filter((c) =>
+  goodUrls.has(c.postingUrl))` instead of filtering out a `deadUrls` set.
+  Also, if the `checkUrls` call itself throws (can't reach our own endpoint),
+  the batch now fails closed (`cand = []`) instead of failing open — under
+  the old "not proven dead" policy, letting everything through when the
+  check couldn't run was consistent; under the new "must be positively
+  confirmed" policy, it would have been a loophole.
+- `checkOneUrl` (`functions/index.js`): switched from a HEAD-first (GET
+  fallback only on 405/501) strategy to a single realistic GET with
+  browser-shaped headers (a real Chrome UA, `Accept`, `Accept-Language`).
+  Rationale: a real visitor reaches a posting via GET, not HEAD — a bare HEAD
+  request or a self-identifying "HarnonLinkCheck" User-Agent is itself a bot
+  signal to some job-board WAFs, which would make the check *less* accurate,
+  not more legitimate, right when accuracy matters most (the safety net for
+  "couldn't confirm" is gone). Timeout raised 8s → 10s to reduce false
+  timeouts now that a timeout means exclusion, not a pass-through.
+- Tuned the loop to compensate for the yield drop this strictness causes:
+  `searchBatch` now asks for 10 postings per batch instead of 6, and the
+  `emptyStreak` give-up threshold went from 2 to 3 (in all four places it's
+  checked) — stricter filtering means more batches will legitimately come up
+  empty before finding a confirmable one, so the loop needed more patience
+  before concluding nothing's left.
+
+**Real-world signal from testing the header change** (via the Firebase
+emulator, against actual live pages, not mocks): `linkedin.com/company/google/`
+and `boards.greenhouse.io/` both returned a clean `ok:true` — the
+browser-shaped GET request does get past LinkedIn's basic bot detection for
+at least company/profile pages. `indeed.com/` returned `ok:null` (403,
+"blocked") even with the same realistic headers — Indeed's blocking appears
+to key on the requesting IP being a known cloud/datacenter range (Google
+Cloud Functions egress), which no amount of header spoofing fixes from a
+server-side check. **Known consequence of this redesign**: Indeed-sourced
+postings will likely be systematically under-represented or excluded going
+forward, since this app's server-side link check may rarely be able to
+positively confirm an Indeed URL, regardless of whether the posting is
+actually real and open. Fixing that would require a materially different
+approach (e.g. rendering through a real headless browser or a residential
+proxy) that wasn't in scope here — flagged for awareness, not solved.
+
 ---
 
 ## 1. What this project is

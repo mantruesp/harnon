@@ -44,7 +44,7 @@ export function useJobSearch(
       ? "Do NOT repeat any of these already-found roles: " + knownKeys.slice(-15).join("; ") + ". Find DIFFERENT postings. "
       : "";
     const instruction =
-      "Use web search to find 6 real, currently-open job postings in the United States that match this candidate. " +
+      "Use web search to find 10 real, currently-open job postings in the United States that match this candidate. " +
       filters + exclude +
       "Candidate profile: " + JSON.stringify(p) + ". " +
       "For each posting, find the actual application/listing URL (LinkedIn, Indeed, or the company careers page). " +
@@ -125,21 +125,23 @@ export function useJobSearch(
       catch (e: any) { setError(e.message); break; }
       if (stopRef.current) break;
       cand = (cand || []).filter((c) => !acc.some((a) => jobKey(a) === jobKey(c)));
-      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
-      // Only positions with a real, working link get shown at all — a job
-      // with no URL, or a URL that comes back with a genuine 404/410/5xx,
-      // is dropped here rather than shown without a "View posting" button.
-      // Inconclusive checks (a job board blocking the automated request
-      // with a 401/403/429, or a timeout) are NOT treated as broken — that's
-      // not proof the link is dead, just that we couldn't confirm it.
+      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 3) break; continue; }
+      // Only positions with a POSITIVELY CONFIRMED working link get shown —
+      // a job with no URL, a confirmed-dead one (404/410/5xx), or one we
+      // simply couldn't confirm (blocked by the site's bot detection, a
+      // timeout, or the check itself failing) are all dropped here. This is
+      // deliberately strict: inconclusive is not the same as working, so it
+      // no longer passes.
       cand = cand.filter((c) => c.postingUrl);
-      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
+      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 3) break; continue; }
       try {
         const urlResults = await checkUrls(cand.map((c) => c.postingUrl));
-        const deadUrls = new Set(urlResults.filter((r) => r.ok === false).map((r) => r.url));
-        if (deadUrls.size) cand = cand.filter((c) => !deadUrls.has(c.postingUrl));
-      } catch (e) { /* best-effort — if the check endpoint is unreachable, don't block the search */ }
-      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 2) break; continue; }
+        const goodUrls = new Set(urlResults.filter((r) => r.ok === true).map((r) => r.url));
+        cand = cand.filter((c) => goodUrls.has(c.postingUrl));
+      } catch (e) {
+        cand = []; // couldn't even run the check — nothing here is confirmed, so nothing qualifies
+      }
+      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 3) break; continue; }
       setSearchPhase("verifying");
       const { openOnes, unconfirmedOnes, hidden } = await verifyBatch(cand);
       if (stopRef.current) break;
@@ -154,7 +156,7 @@ export function useJobSearch(
         setUnconfirmedJobs([...uncRef.current]);
       }
       if (hidden) setHiddenCount((h) => h + hidden);
-      if (acc.length === before) { emptyStreak++; if (emptyStreak >= 2) break; }
+      if (acc.length === before) { emptyStreak++; if (emptyStreak >= 3) break; }
       else { emptyStreak = 0; acc.sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0)); setJobs([...acc]); }
     }
     setJobs([...acc.sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0))]);

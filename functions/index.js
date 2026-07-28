@@ -312,11 +312,13 @@ exports.claude = exports.llm;
 // doesn't exist, e.g. https://jobs.boeing.com/job/.../68234521 returning a
 // genuine 404. Guessing about URL shape doesn't catch that; only actually
 // requesting the URL does. This does a real HTTP check server-side (the
-// browser can't fetch arbitrary third-party origins itself) so a confirmed
-// 404/410/5xx can be excluded before it ever reaches the user.
+// browser can't fetch arbitrary third-party origins itself). The caller
+// (runBatches) requires ok:true — a positively-confirmed reachable link —
+// for a job to be shown at all; ok:false (confirmed dead) and ok:null
+// (couldn't confirm either way) are both excluded.
 
 const CHECK_URL_MAX = 20;
-const CHECK_URL_TIMEOUT_MS = 8000;
+const CHECK_URL_TIMEOUT_MS = 10000;
 
 // Basic SSRF guard: this endpoint fetches whatever URL a client sends, so
 // refuse anything that resolves to loopback/link-local/private ranges rather
@@ -348,18 +350,24 @@ async function checkOneUrl(url) {
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CHECK_URL_TIMEOUT_MS);
-  const headers = { "user-agent": "Mozilla/5.0 (compatible; HarnonLinkCheck/1.0)" };
+  // A real visitor reaches a posting with a GET and browser-shaped headers —
+  // matching that gives the most honest reachability signal. A bare HEAD
+  // request or a self-identifying "LinkCheck" User-Agent is itself a bot
+  // signal to some job-board WAFs, which would make the check LESS accurate
+  // now that only a positive confirmation counts as a good match.
+  const headers = {
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "accept-language": "en-US,en;q=0.9",
+  };
   try {
-    let r = await fetch(url, { method: "HEAD", redirect: "follow", signal: controller.signal, headers });
-    if (r.status === 405 || r.status === 501) {
-      r = await fetch(url, { method: "GET", redirect: "follow", signal: controller.signal, headers });
-    }
+    const r = await fetch(url, { method: "GET", redirect: "follow", signal: controller.signal, headers });
     if (r.status === 404 || r.status === 410) return { url, ok: false, status: r.status, reason: "not-found" };
     if (r.status >= 500) return { url, ok: false, status: r.status, reason: "server-error" };
-    // Many job boards (LinkedIn especially) block non-browser requests with
-    // 401/403/429 or a custom "automated traffic" status — that's not proof
-    // the posting is dead, just that we can't check it. Treat as inconclusive
-    // rather than penalizing real, working links.
+    // A job board blocking the request (401/403/429, or LinkedIn's custom
+    // "automated traffic" status) isn't proof the posting is dead, just that
+    // we couldn't confirm it — tracked distinctly from a confirmed-dead
+    // link, even though both currently fail to qualify as a "good" match.
     if ([401, 403, 429, 999].includes(r.status)) return { url, ok: null, status: r.status, reason: "blocked" };
     if (r.status >= 200 && r.status < 400) return { url, ok: true, status: r.status, reason: "" };
     return { url, ok: null, status: r.status, reason: "unknown" };
