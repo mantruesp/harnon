@@ -427,26 +427,23 @@ export default function App() {
     return (j.title || "").toLowerCase().trim() + "|" + (j.company || "").toLowerCase().trim();
   }
 
-  // Cheap, no-network check for URLs that are obviously not a specific
-  // posting — catches the most common hallucination shapes (a bare careers
-  // homepage, or a LinkedIn/Indeed *search* URL instead of a listing).
-  // IMPORTANT: an empty/missing URL is NOT "bad" here — the model may
-  // honestly not have found a confident direct link, and that's fine; the
-  // job itself is still a real match. This only flags a URL that *is*
-  // present but looks wrong, so callers can drop the link without dropping
-  // the job.
+  // Minimal, no-network sanity check — deliberately loose. Job boards and
+  // company career sites use too many different URL shapes to pattern-match
+  // reliably (an earlier, stricter version here rejected plenty of real
+  // links), so this only catches things that can't possibly be a specific
+  // posting: not a URL at all, or a bare domain root with no path. Everything
+  // else is trusted and shown; the deterministic HTTP check below is what
+  // actually catches dead links, not guesswork about URL shape.
+  // An empty/missing URL is NOT "bad" — the model may honestly not have
+  // found one, and that's fine; the job itself is still a real match.
   function looksLikeBadPostingUrl(url) {
     if (!url) return false;
     if (typeof url !== "string") return true;
     let u;
     try { u = new URL(url); } catch (e) { return true; }
     if (!/^https?:$/.test(u.protocol)) return true;
-    const host = u.hostname.replace(/^www\./, "").toLowerCase();
     const path = u.pathname.replace(/\/+$/, "") || "/";
-    if (path === "/" || /^\/(jobs|careers|job-search|search|opportunities)$/i.test(path)) return true;
-    if (host.endsWith("linkedin.com") && !path.includes("/jobs/view/")) return true;
-    if (host.endsWith("indeed.com") && !(path.includes("/viewjob") || path.includes("/rc/clk"))) return true;
-    return false;
+    return path === "/";
   }
 
   // Real HTTP check, run server-side (to dodge CORS and browser fetch
@@ -486,10 +483,8 @@ export default function App() {
       "Use web search to find 6 real, currently-open job postings in the United States that match this candidate. " +
       filters + exclude +
       "Candidate profile: " + JSON.stringify(p) + ". " +
-      "CRITICAL — postingUrl must be a direct link to the ONE specific job listing page, the exact page a candidate would land on to apply for THIS role, never a search-results page, a jobs-category page, or a generic careers homepage. " +
-      "Good: a LinkedIn URL containing '/jobs/view/', an Indeed URL containing '/viewjob', a Greenhouse/Lever/Workday link that resolves straight to that one posting, or a company site URL for that specific role. " +
-      "Bad — never produce these: 'linkedin.com/jobs/search?...', 'indeed.com/jobs?q=...', a bare company careers/jobs homepage, or any URL you are not confident points at this exact posting. " +
-      "If you cannot find a real, direct URL for a posting, leave postingUrl as an empty string — do not guess or invent one. " +
+      "postingUrl should be a direct link to the ONE specific job listing page from your search results — the page a candidate would land on to apply for THIS role, not a search-results page or a generic careers homepage. " +
+      "Use the actual URL from your search results — prefer giving your best real link over leaving it blank. Only use an empty string if search genuinely returned no link at all for that posting; never fabricate a URL that didn't come from your search results. " +
       "After searching, respond with ONLY a JSON array (no markdown, no prose). Each item schema:\n" +
       '{"title":string,"company":string,"location":string,"remote":boolean,' +
       '"matchScore":number(0-100),"matchReasons":[string up to 3],' +

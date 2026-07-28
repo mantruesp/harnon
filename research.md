@@ -163,6 +163,33 @@ X blank if unsure" is a real behavior change, not just documentation — code
 that treats "blank" as a failure condition needs to be updated in the same
 change, not after the fact.
 
+### 0.3 Follow-up fix — same day: still too many "No confirmed link" jobs
+
+After 0.2, users still saw "No confirmed link" on jobs that were themselves
+confirmed open — a confusing combination (why would a verified-real, currently
+open job have no link?). Root cause: `looksLikeBadPostingUrl`'s per-platform
+pattern matching (requiring `/jobs/view/` on LinkedIn, `/viewjob` on Indeed,
+rejecting bare `/jobs`/`/careers`/`/search` paths) was too strict for the
+actual variety of URL shapes real job boards and company career sites use,
+so it was clearing plenty of genuinely good links.
+
+Fixed by trusting the model's URL by default: `looksLikeBadPostingUrl` now
+only rejects a non-empty value that isn't a parseable http(s) URL, or is a
+bare domain root with no path at all (e.g. `https://linkedin.com` alone,
+which categorically cannot be a specific posting). All platform-specific path
+matching was removed. The deterministic `checkUrls` HTTP check (§0.1) — which
+only clears a link on an actual confirmed 404/410/5xx — remains the real
+backstop against dead links; shape-guessing is no longer in the loop at all.
+Also softened the search prompt: "prefer giving your best real link over
+leaving it blank" replaced the earlier "leave empty if unsure" wording, which
+was making the model default to blank more than necessary.
+
+**Pattern across 0.1→0.3:** each fix corrected a real problem but overshot in
+the strict direction, trading false negatives (hidden real links/jobs) for
+the original false positives (dead links). The net design that stuck: verify
+with real, objective signals (an HTTP 404 is a fact) and be permissive
+everywhere guessing would otherwise be required.
+
 ---
 
 ## 1. What this project is
