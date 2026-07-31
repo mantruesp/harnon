@@ -133,6 +133,28 @@ function applyCors(req, res) {
 
 // ──────────────────────── Anthropic call ────────────────────────
 
+// Pulls the REAL urls Claude's web_search tool actually returned out of the
+// response, independent of anything the model says in its final text. Per
+// Anthropic's docs, a successful search produces a `web_search_tool_result`
+// block with `content: [{ type: "web_search_result", url, title, ... }]`;
+// a failed search has `content: { type: "web_search_tool_result_error" }`
+// (an object, not an array) — skipped here rather than crashing on it.
+// This is what lets the caller verify a claimed postingUrl was actually
+// seen in search results, not invented or altered by the model afterward.
+function extractGroundedUrls(content) {
+  const urls = new Set();
+  for (const block of content || []) {
+    if (block && block.type === "web_search_tool_result" && Array.isArray(block.content)) {
+      for (const item of block.content) {
+        if (item && item.type === "web_search_result" && typeof item.url === "string") {
+          urls.add(item.url);
+        }
+      }
+    }
+  }
+  return Array.from(urls);
+}
+
 async function callAnthropic(key, { system, content, tools, max_tokens, model }) {
   const body = {
     model: model || DEFAULT_MODEL,
@@ -151,7 +173,16 @@ async function callAnthropic(key, { system, content, tools, max_tokens, model })
     },
     body: JSON.stringify(body),
   });
-  return r.json();
+  const data = await r.json();
+  if (Array.isArray(data.content)) {
+    const groundedUrls = extractGroundedUrls(data.content);
+    data.groundedUrls = groundedUrls;
+    if (tools) {
+      const searchCount = data.usage?.server_tool_use?.web_search_requests ?? 0;
+      console.log("web_search: requests=" + searchCount + " groundedUrls=" + groundedUrls.length + " model=" + (model || DEFAULT_MODEL));
+    }
+  }
+  return data;
 }
 
 // ──────────────────────── Groq call (OpenAI-compatible) ────────────────────────

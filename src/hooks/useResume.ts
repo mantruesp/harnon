@@ -69,7 +69,7 @@ export function useResume(selectedModel: string, setError: (msg: string) => void
         '"improvements":[{"issue":string,"fix":string}],' +
         '"atsKeywords":[string]' +
         (needsTranscript ? ',"resumeText":string(the full resume as clean plain text, so it can be reused later)}' : "}");
-      const text = await callClaude({ content: resumeContent(instruction), maxTokens: needsTranscript ? 4096 : 2048, model: selectedModel });
+      const { text } = await callClaude({ content: resumeContent(instruction), maxTokens: needsTranscript ? 4096 : 2048, model: selectedModel });
       const parsed = extractJson<ResumeAnalysis>(text);
       const rt = resumeText.trim() ? resumeText : (parsed.resumeText || "");
       if (!resumeText.trim() && parsed.resumeText) setResumeText(parsed.resumeText);

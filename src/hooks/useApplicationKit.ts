@@ -39,7 +39,7 @@ export function useApplicationKit(
         '"willRelocate":string("Yes"|"No"|"Confirm"),' +
         '"screeningAnswers":[{"q":string,"a":string}] (write ready-to-paste answers to 4-5 common portal questions tailored to THIS job and company, e.g. "Why do you want to work here?", "Describe your most relevant experience", "What is your greatest strength?")},' +
         '"prepNotes":[string(2-4 quick tips: keywords to add, likely interview themes, or gaps to address)]}';
-      const text = await callClaude({ content: resumeContent(instruction), maxTokens: 4096, model: selectedModel });
+      const { text } = await callClaude({ content: resumeContent(instruction), maxTokens: 4096, model: selectedModel });
       setKit(extractJson<ApplicationKit>(text));
     } catch (e: any) { setError(e.message); setActiveJob(null); }
     setBuildingKit(false);

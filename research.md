@@ -385,6 +385,79 @@ actually real and open. Fixing that would require a materially different
 approach (e.g. rendering through a real headless browser or a residential
 proxy) that wasn't in scope here — flagged for awareness, not solved.
 
+### 0.8 Grounding fix: verify postingUrl against real search results, not the model's retelling
+
+Owner supplied a detailed, specific diagnosis of the actual hallucination
+mechanism (extraction vs. generation, snippet-only context, whether the tool
+is even being called) and asked to redo the search process around it. Root
+insight acted on: everything up to this point (§0.1–0.7) validated the
+*model's final text* — either by prompting it to be careful, or by
+independently re-checking the URL over HTTP. Neither approach ever looked at
+what Claude's `web_search` tool actually returned mid-turn. Anthropic's API
+response includes that verbatim, in `web_search_tool_result` content blocks
+(`{type:"web_search_result", url, title, ...}` per real search hit) —
+completely independent of anything the model says afterward. Confirmed the
+exact schema against Anthropic's current docs before implementing (fetched
+live, not from memory) to avoid guessing at field names.
+
+**What changed:**
+1. **`extractGroundedUrls()`** (`functions/index.js`, inside `callAnthropic`):
+   pulls every real `url` out of `web_search_tool_result` blocks (skipping
+   the error-shaped variant, `content` as an object not an array, per docs)
+   and attaches the list as `data.groundedUrls` before the response reaches
+   the client. Also logs `web_search_requests` (from the API's own `usage`
+   object) and the grounded-url count whenever search tools were used —
+   directly implements the "test whether it's calling the tool at all"
+   diagnostic: a confident result set with `web_search_requests: 0` is now
+   visible in Cloud Functions logs, not just inferable after the fact.
+2. **`callClaude()`** (`api/client.ts`) now returns `{ text, groundedUrls }`
+   instead of a bare string; all four call sites updated.
+3. **`searchBatch`** (`useJobSearch.ts`) cross-checks every candidate's
+   `postingUrl` against the real `groundedUrls` set (normalized: trimmed,
+   trailing slash stripped, no other rewriting — an exact match is the bar,
+   matching the "never modify a URL" rule below). Any `postingUrl` that isn't
+   an exact match gets cleared to `""` — which then cascades into the
+   existing "must have a url" and "must be `ok:true`" filters already in
+   place, so an ungrounded URL doesn't just lose its badge, the job drops
+   out entirely unless the model reports no URL at all. This also correctly
+   handles the "model didn't really search" case for free: if
+   `groundedUrls` is empty (no search happened this turn), every
+   `postingUrl` fails the check, exactly as it should.
+4. **Explicit extraction-vs-generation system prompt rule**, using close to
+   the owner's exact wording: *"you may only report a title, company,
+   location, salary, or postingUrl that appears verbatim in your search tool
+   results... do not infer, complete, or construct... never modify, shorten,
+   reformat, or reconstruct a URL."* This is a different kind of intervention
+   than §0.1–0.3's reverted heuristics — those tried to guess at *shape*
+   after the fact; this states the *epistemic rule* up front. Kept narrowly
+   scoped to the search-enabled path only.
+
+**Verified against the live Anthropic API** (not mocked): a real search-tool
+call for "Senior Software Engineer" postings returned 15 real
+`web_search_result` urls; both postingUrls the model reported (Google,
+Microsoft) were exact matches within that set — confirming the mechanism
+doesn't false-positive on a model that's behaving honestly, which is the
+common case. (A live hallucination to catch on demand isn't something you
+can reliably force for a test — the logic is a simple set-membership check,
+so correctness follows from the extraction being accurate, which this run
+confirms.)
+
+**Remaining two points from the owner's list, addressed by inspection
+rather than new code:**
+- *"Verify post-hoc, not pre-hoc, preserving open search"* — already the
+  design since §0.1/§0.5: the search prompt stays fully general (no
+  domain allowlist), and `checkUrls` runs an independent HTTP check after
+  the fact. No change needed.
+- *"Check if the search tool returns snippets only"* — checked against
+  Anthropic's docs: the web search tool's result blocks carry
+  `encrypted_content` (substantive page content Claude reads in-context to
+  formulate its answer, not just a title+snippet), so the "pattern-completing
+  because it only saw a snippet" failure mode described doesn't apply to this
+  specific tool the way it would to a bare snippet-only search API. No
+  additional fetch-the-top-candidates step was added, since Claude already
+  had real content to ground its answer in — the actual gap was that we
+  never *checked* against that grounding, which item 1 above now fixes.
+
 ---
 
 ## 1. What this project is

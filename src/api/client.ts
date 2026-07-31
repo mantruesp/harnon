@@ -75,7 +75,16 @@ export function extractJson<T = any>(raw: string): T {
   throw new Error("The response was cut off. Try again.");
 }
 
-export async function callClaude({ system, content, tools, maxTokens = 4096, model }: CallClaudeOptions): Promise<string> {
+export interface CallClaudeResult {
+  text: string;
+  // Real urls Claude's web_search tool actually returned, straight from the
+  // API response — independent of anything the model claims in its final
+  // text. Empty when no search happened (free models, or a search-capable
+  // model that chose not to search this turn).
+  groundedUrls: string[];
+}
+
+export async function callClaude({ system, content, tools, maxTokens = 4096, model }: CallClaudeOptions): Promise<CallClaudeResult> {
   const res = await fetch(API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -96,7 +105,7 @@ export async function callClaude({ system, content, tools, maxTokens = 4096, mod
     .join("\n")
     .trim();
   if (!text) throw new Error("Claude didn't return any text. Please try again.");
-  return text;
+  return { text, groundedUrls: Array.isArray(data.groundedUrls) ? data.groundedUrls : [] };
 }
 
 export function makeId(): string {

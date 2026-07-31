@@ -7,6 +7,10 @@ function jobKey(j: Pick<JobPosting, "title" | "company">): string {
   return (j.title || "").toLowerCase().trim() + "|" + (j.company || "").toLowerCase().trim();
 }
 
+function normalizeUrl(u: string): string {
+  return (u || "").trim().replace(/\/+$/, "");
+}
+
 export function useJobSearch(
   analysis: ResumeAnalysis | null,
   selectedModel: string,
@@ -54,16 +58,39 @@ export function useJobSearch(
       '"visaSponsorship":"stated"|"likely"|"unknown","visaNote":string(which visa types this employer is known to sponsor, e.g. "H-1B & TN", or ""),' +
       '"salary":string(or ""),"postingUrl":string,"source":string}. ' +
       "Base matchScore on real overlap with the candidate's skills and seniority. Only include postings you actually found.";
+    // Models default to "filling gaps helpfully" from training data unless
+    // told plainly not to — this is the actual mechanism behind hallucinated
+    // job details and URLs, not a rare failure. Spelled out as an explicit
+    // extraction-vs-generation rule rather than left implicit.
+    const groundingRule =
+      "CRITICAL: you may only report a title, company, location, salary, or postingUrl that appears verbatim in your search tool results. " +
+      "Do not infer, complete, or construct any of these from general knowledge or pattern-matching on what a listing 'usually' looks like. " +
+      "If a detail isn't in the search results, omit it (empty string) rather than guessing. " +
+      "Never modify, shorten, reformat, or reconstruct a URL — copy it exactly as it appeared in the search results, or leave postingUrl empty.";
     const opts: CallClaudeOptions = {
       content: instruction,
-      system: "You are a diligent US job-search assistant. " + (hasWebSearch ? "Only return postings backed by real search results with working URLs." : "Return the best real postings you know of with real company career-page or LinkedIn URLs. Use your training data since live search is not available."),
+      system: "You are a diligent US job-search assistant. " +
+        (hasWebSearch
+          ? "Only return postings backed by real search results with working URLs. " + groundingRule
+          : "Return the best real postings you know of with real company career-page or LinkedIn URLs. Use your training data since live search is not available."),
       maxTokens: 4096,
       model: selectedModel,
     };
     if (hasWebSearch) opts.tools = [{ type: "web_search_20250305", name: "web_search" }];
-    const text = await callClaude(opts);
+    const { text, groundedUrls } = await callClaude(opts);
     const arr = extractJson<any>(text);
-    return Array.isArray(arr) ? arr : arr.jobs || [];
+    const jobs: JobPosting[] = Array.isArray(arr) ? arr : arr.jobs || [];
+    if (!hasWebSearch) return jobs;
+    // Belt and suspenders on top of the prompt rule above: cross-check every
+    // claimed postingUrl against the REAL urls the search tool returned in
+    // this response (not the model's retelling of them). A url that isn't
+    // an exact match either got altered or was never grounded at all —
+    // either way, it doesn't survive. This still runs even when
+    // groundedUrls is empty (the model chose not to search this turn), in
+    // which case every postingUrl correctly gets cleared, since none of
+    // them are grounded in anything real.
+    const grounded = new Set(groundedUrls.map(normalizeUrl));
+    return jobs.map((j) => (j.postingUrl && !grounded.has(normalizeUrl(j.postingUrl)) ? { ...j, postingUrl: "" } : j));
   }
 
   async function verifyBatch(cands: JobPosting[]): Promise<{ openOnes: JobPosting[]; unconfirmedOnes: JobPosting[]; hidden: number }> {
@@ -82,7 +109,7 @@ export function useJobSearch(
       JSON.stringify(cands.map((j) => ({ title: j.title, company: j.company, location: j.location, postingUrl: j.postingUrl, source: j.source })));
     let verified: any[] = [];
     try {
-      const vtext = await callClaude({
+      const { text: vtext } = await callClaude({
         content: verifyInstruction,
         system: "You verify job postings against live web results. Never mark a posting open unless the search results support it.",
         tools: [{ type: "web_search_20250305", name: "web_search" }],
