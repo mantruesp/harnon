@@ -324,13 +324,25 @@ exports.llm = onRequest(
 
       if (data.error) {
         console.error("Provider error for model " + model + ":", JSON.stringify(data.error));
-        res.status(502).json({ error: "The AI provider request failed. Please try again." });
+        // Hide upstream error detail from real callers (could leak internals),
+        // but surface it directly when running in the emulator — guessing at
+        // a provider error from a generic message during local debugging
+        // wastes more time than it protects.
+        const isEmulator = process.env.FUNCTIONS_EMULATOR === "true";
+        res.status(502).json({
+          error: "The AI provider request failed. Please try again.",
+          ...(isEmulator ? { debug: data.error } : {}),
+        });
         return;
       }
       res.json(data);
     } catch (e) {
       console.error("Unhandled /api/llm error:", e);
-      res.status(500).json({ error: "Something went wrong processing that request. Please try again." });
+      const isEmulator = process.env.FUNCTIONS_EMULATOR === "true";
+      res.status(500).json({
+        error: "Something went wrong processing that request. Please try again.",
+        ...(isEmulator ? { debug: String((e && e.stack) || e) } : {}),
+      });
     }
   }
 );
