@@ -458,6 +458,39 @@ rather than new code:**
   had real content to ground its answer in — the actual gap was that we
   never *checked* against that grounding, which item 1 above now fixes.
 
+### 0.9 Local-dev 403 chased down to two real causes, plus a port move
+
+User reported a 403 on `/api/claude` while debugging locally. Diagnosed by
+directly reproducing the local setup rather than guessing from the report:
+
+1. **`localhost:5173` vs `127.0.0.1:5173` are different origins.** Only the
+   `localhost` variant was in `ALLOWED_ORIGINS` — loading the Vite dev app via
+   `127.0.0.1` got 403'd by the same origin-allowlist logic from §0/§0.6.
+   Added the `127.0.0.1:5173` variant (matching the pair that already existed
+   for :5000).
+2. **The actual root cause, found by reproducing locally**: no Firebase
+   emulator was running at all (`ps aux` showed only Vite's process) — so
+   Vite's `/api/*` proxy (target `http://127.0.0.1:5000`) was forwarding
+   straight into whatever else was listening on :5000. `curl -i
+   http://127.0.0.1:5000/` returned `403 Forbidden`, `Server: AirTunes/...` —
+   **macOS's AirPlay Receiver**, which occupies port 5000 by default on most
+   Macs and returns a blank 403 for any request instead of a connection
+   error. This has nothing to do with this app's origin-check at all; it's a
+   platform-level port squat that silently swallows the Firebase Hosting
+   emulator's default port. (This exact conflict already bit local
+   smoke-testing earlier in this session — see §0.6/§0.7's testing notes,
+   worked around there with a throwaway port. This time it's fixed for good.)
+
+**Fix: moved the default hosting emulator port from 5000 to 5050, project-wide.**
+Updated `firebase.json` (`emulators.hosting.port`), `vite.config.ts` (proxy
+target), `functions/index.js` and `harnon-autoapply/server.js` (both
+`ALLOWED_ORIGINS` — swapped the `:5000` pair for a `:5050` pair), and the
+README/this doc's run instructions. Functions emulator stays on :5001
+(unaffected — AirPlay only squats :5000, not :5001). This trades a very
+minor deviation from Firebase's own default port for eliminating a
+conflict that will otherwise recur for any Mac user with AirPlay Receiver
+enabled (the macOS default).
+
 ---
 
 ## 1. What this project is
@@ -535,8 +568,8 @@ Local machine (optional, NOT on Firebase)
 | `src/storage.js` | `saveResume` / `loadResumeRecord` — **localStorage only**, keyed `harnon:resume:<id>`. |
 | `functions/index.js` | The multi-provider proxy + `/api/models`. |
 | `harnon-autoapply/server.js` | Local `:8787` server; `/ping` + `/apply`; heuristic Playwright form filler. |
-| `firebase.json` | Hosting `public: dist`, `/api/*` rewrites, SPA fallback, emulator ports (hosting 5000, functions 5001). |
-| `vite.config.js` | Dev server :5173 proxies `/api` → `http://127.0.0.1:5000` (the hosting emulator). |
+| `firebase.json` | Hosting `public: dist`, `/api/*` rewrites, SPA fallback, emulator ports (hosting 5050, functions 5001 — hosting deliberately isn't 5000, see §9). |
+| `vite.config.ts` | Dev server :5173 proxies `/api` → `http://127.0.0.1:5050` (the hosting emulator). |
 | `.firebaserc` | Firebase project aliases. **Default project = `harnor`** (looks like a typo of "harnon"). |
 
 ---
@@ -727,11 +760,11 @@ firebase functions:secrets:set ANTHROPIC_API_KEY   # or GROQ_API_KEY / GEMINI_AP
 
 # run locally (emulator serves app + function with /api rewrite)
 npm run build
-firebase emulators:start          # hosting :5000, functions :5001
+firebase emulators:start          # hosting :5050, functions :5001
 
 # hot-reload dev (two terminals)
 firebase emulators:start          # terminal 1
-npm run dev                       # terminal 2 → :5173, proxies /api → :5000
+npm run dev                       # terminal 2 → :5173, proxies /api → :5050
 
 # optional auto-apply helper
 cd harnon-autoapply && npm start  # :8787
@@ -740,8 +773,14 @@ cd harnon-autoapply && npm start  # :8787
 npm run deploy                    # build + firebase deploy
 ```
 
-Note: `npm run dev` alone is **not** enough — `/api/*` 404s unless the emulator
-(or deployed functions) is up, because Vite only *proxies* those paths.
+Note: `npm run dev` alone is **not** enough — `/api/*` 403s/hangs unless the
+emulator (or deployed functions) is up, because Vite only *proxies* those
+paths. The hosting emulator deliberately runs on **:5050, not Firebase's
+default :5000** — on most Macs, :5000 is permanently occupied by AirPlay
+Receiver (`Server: AirTunes/...`), which returns a blank 403 for every
+request instead of a helpful "port in use" error. If `firebase
+emulators:start` ever fails to bind hosting, check `lsof -nP -iTCP:<port>` for
+what's actually listening before assuming it's an app bug.
 
 ---
 

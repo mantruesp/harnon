@@ -15,7 +15,7 @@
   },
   "emulators": {
     "functions": { "port": 5001 },
-    "hosting": { "port": 5000 },
+    "hosting": { "port": 5050 },
     "ui": { "enabled": true }
   }
 }

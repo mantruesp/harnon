@@ -83,7 +83,7 @@ firebase functions:secrets:set GEMINI_API_KEY        # free, no credit card
 ```bash
 npm run build                 # produces dist/
 firebase emulators:start      # serves the app + function with the /api rewrite
-# open the hosting URL it prints (usually http://localhost:5000)
+# open the hosting URL it prints (usually http://localhost:5050)
 ```
 
 Prefer hot reload? In two terminals:
