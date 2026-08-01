@@ -132,6 +132,32 @@ function applyCors(req, res) {
   return true;
 }
 
+// ──────────────────────── Network retry ────────────────────────
+// `fetch` to an external API can fail below the HTTP layer entirely --
+// "SocketError: other side closed" / UND_ERR_SOCKET is Node's undici client
+// reporting the connection was dropped before any response came back. This
+// is a transient network condition (a blip, a stale pooled connection, a
+// mid-flight reset), not an application error, and it's indistinguishable
+// from a real outage on a single attempt. A short retry clears the common
+// case; a real outage still surfaces as an error after retries are exhausted.
+function isTransientNetworkError(e) {
+  if (!e) return false;
+  const code = e.code || e.cause?.code;
+  if (code === "UND_ERR_SOCKET" || code === "ECONNRESET" || code === "ETIMEDOUT" || code === "EPIPE") return true;
+  return /fetch failed/i.test(e.message || "");
+}
+
+async function fetchWithRetry(url, options, retries = 2, backoffMs = 400) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetch(url, options);
+    } catch (e) {
+      if (attempt >= retries || !isTransientNetworkError(e)) throw e;
+      await new Promise((resolve) => setTimeout(resolve, backoffMs * (attempt + 1)));
+    }
+  }
+}
+
 // ──────────────────────── Anthropic call ────────────────────────
 
 // Pulls the REAL urls Claude's web_search tool actually returned out of the
@@ -165,7 +191,7 @@ async function callAnthropic(key, { system, content, tools, max_tokens, model })
   if (system) body.system = system;
   if (tools)  body.tools  = tools;
 
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
+  const r = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -197,7 +223,7 @@ async function callGroq(key, { system, content, max_tokens, model }) {
     : content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
   messages.push({ role: "user", content: userText });
 
-  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  const r = await fetchWithRetry("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: "Bearer " + key },
     body: JSON.stringify({ model: model || "llama-3.3-70b-versatile", max_tokens: max_tokens || 4096, messages }),
@@ -224,7 +250,7 @@ async function callGemini(key, { system, content, max_tokens, model }) {
   if (system) body.systemInstruction = { parts: [{ text: system }] };
   if (max_tokens) body.generationConfig = { maxOutputTokens: max_tokens };
 
-  const r = await fetch(url, {
+  const r = await fetchWithRetry(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -339,8 +365,11 @@ exports.llm = onRequest(
     } catch (e) {
       console.error("Unhandled /api/llm error:", e);
       const isEmulator = process.env.FUNCTIONS_EMULATOR === "true";
-      res.status(500).json({
-        error: "Something went wrong processing that request. Please try again.",
+      const message = isTransientNetworkError(e)
+        ? "Network error reaching the AI provider (connection dropped). Please try again."
+        : "Something went wrong processing that request. Please try again.";
+      res.status(isTransientNetworkError(e) ? 502 : 500).json({
+        error: message,
         ...(isEmulator ? { debug: String((e && e.stack) || e) } : {}),
       });
     }

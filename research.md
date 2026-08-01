@@ -491,6 +491,39 @@ minor deviation from Firebase's own default port for eliminating a
 conflict that will otherwise recur for any Mac user with AirPlay Receiver
 enabled (the macOS default).
 
+### 0.10 Retry transient network failures to the AI providers
+
+User hit an unhandled `/api/llm` crash: `TypeError: fetch failed`, cause
+`SocketError: other side closed` / `code: UND_ERR_SOCKET` — Node's `fetch`
+(undici) reporting the TLS connection to `api.anthropic.com` was dropped
+before any response came back (`bytesRead: 0` after writing the request).
+This is a transient network condition — a dropped connection, a stale pooled
+socket, a mid-flight reset — not an application bug, and previously a single
+occurrence failed the entire call with no retry at all.
+
+Added `fetchWithRetry()` (`functions/index.js`), wrapping the outbound
+`fetch()` in `callAnthropic`, `callGroq`, and `callGemini` (not
+`checkOneUrl`'s reachability check — that one already treats any failure as
+inconclusive rather than crashing, so it didn't need this). Retries up to 2
+additional times with a short backoff (400ms, 800ms) — but only for
+`isTransientNetworkError()` matches (`UND_ERR_SOCKET`, `ECONNRESET`,
+`ETIMEDOUT`, `EPIPE`, or a `fetch failed` message); a genuine application
+error (a real bug, a bad response) is rethrown immediately on the first
+attempt rather than wasting three attempts on something a retry can't fix.
+The outer `/api/llm` catch block also now reports a specific, actionable
+502 ("Network error reaching the AI provider... try again") for this case
+instead of lumping it into the generic 500.
+
+Verified with a standalone unit test reproducing the exact reported error
+shape (`TypeError: fetch failed` with `cause.code: "UND_ERR_SOCKET"`):
+recovers after 2 failures, does not retry a non-transient error, and still
+surfaces an error after exhausting retries on a persistent failure. Also
+verified end-to-end against the real emulator: `/api/models` and a live
+`/api/claude` call both succeeded after the change (the intervening 404
+seen once during testing was a stale leftover emulator process from an
+earlier test run holding port 5001, not caused by this change — confirmed
+by a clean restart succeeding immediately).
+
 ---
 
 ## 1. What this project is
