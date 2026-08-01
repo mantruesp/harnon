@@ -1,0 +1,55 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "vite: dev",
+      "type": "npm",
+      "script": "dev",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "vite",
+        "pattern": {
+          "regexp": "^never-matches$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "VITE",
+          "endsPattern": "Local:\\s+http://localhost:5173"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "harnon"
+      }
+    },
+    {
+      "label": "firebase: emulators (inspect)",
+      "type": "shell",
+      "command": "firebase emulators:start --inspect-functions",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "firebase",
+        "pattern": {
+          "regexp": "^never-matches$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Starting emulators",
+          "endsPattern": "All emulators ready!|Could not start .* Emulator"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "harnon"
+      }
+    },
+    {
+      "label": "harnon: start all",
+      "dependsOn": ["firebase: emulators (inspect)", "vite: dev"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    }
+  ]
+}

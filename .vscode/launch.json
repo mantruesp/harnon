@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "chrome",
+      "request": "launch",
+      "name": "Debug Harnon (frontend, Chrome)",
+      "url": "http://localhost:5173",
+      "webRoot": "${workspaceFolder}",
+      "sourceMaps": true,
+      "preLaunchTask": "harnon: start all"
+    },
+    {
+      "type": "node",
+      "request": "attach",
+      "name": "Attach: Functions emulator",
+      "port": 9229,
+      "restart": true,
+      "cwd": "${workspaceFolder}/functions",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Debug Harnon (full stack: frontend + functions)",
+      "configurations": ["Attach: Functions emulator", "Debug Harnon (frontend, Chrome)"],
+      "preLaunchTask": "harnon: start all",
+      "stopAll": true
+    }
+  ]
+}
