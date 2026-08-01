@@ -8,7 +8,7 @@
       "url": "http://localhost:5173",
       "webRoot": "${workspaceFolder}",
       "sourceMaps": true,
-      "preLaunchTask": "vite: dev"
+      "preLaunchTask": "harnon: start all"
     },
     {
       "type": "node",
@@ -18,6 +18,14 @@
       "restart": true,
       "cwd": "${workspaceFolder}/functions",
       "skipFiles": ["<node_internals>/**"]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Debug Harnon (full stack: frontend + functions)",
+      "configurations": ["Attach: Functions emulator", "Debug Harnon (frontend, Chrome)"],
+      "preLaunchTask": "harnon: start all",
+      "stopAll": true
     }
   ]
 }

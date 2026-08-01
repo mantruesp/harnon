@@ -10,7 +10,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "deploy": "npm run build && firebase deploy",
-    "debug": "npm run build && npm run dev && firebase emulators:start"
+    "debug": "firebase emulators:start --inspect-functions & npm run dev; kill %1 2>/dev/null"
   },
   "dependencies": {
     "react": "^18.3.1",
