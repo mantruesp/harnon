@@ -13,6 +13,8 @@ export type ClaudeContent = string | ClaudeContentBlock[];
 export interface ClaudeTool {
   type: string;
   name: string;
+  /** Caps how many searches Claude may run in one call. Omitted = unbounded. */
+  max_uses?: number;
 }
 
 export interface CallClaudeOptions {

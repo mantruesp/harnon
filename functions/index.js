@@ -84,6 +84,11 @@ const ALLOWED_ORIGINS = new Set([
   "http://127.0.0.1:5050",
 ]);
 
+// Hard ceiling on web searches per request. Search bills per use on top of
+// the tokens for every page it pulls into context, so this is the single
+// most effective spend control in the app.
+const MAX_SEARCH_USES = 5;
+
 const MAX_CONTENT_CHARS = 8_000_000; // generous ceiling: a multi-page PDF resume as base64 + prompt text
 const MAX_SYSTEM_CHARS = 20_000;
 const HARD_MAX_TOKENS = 4096;
@@ -145,6 +150,29 @@ function isTransientNetworkError(e) {
   const code = e.code || e.cause?.code;
   if (code === "UND_ERR_SOCKET" || code === "ECONNRESET" || code === "ETIMEDOUT" || code === "EPIPE") return true;
   return /fetch failed/i.test(e.message || "");
+}
+
+// Turns an upstream provider error into a message that tells the operator
+// what to actually do. Retryable/transient conditions keep the generic "try
+// again"; conditions only a human can clear (billing, bad key) say so
+// plainly, because "please try again" for an empty credit balance sends you
+// hunting through application code for a problem that isn't there.
+function describeProviderError(err) {
+  const msg = String((err && (err.message || err.error?.message)) || "");
+  const type = String((err && (err.type || err.error?.type)) || "");
+  if (/credit balance|billing|insufficient.*(fund|quota)|purchase credits/i.test(msg)) {
+    return "The Anthropic account is out of credits. Add credits in the Anthropic Console (Plans & Billing) — retrying won't help until then.";
+  }
+  if (/rate.?limit/i.test(msg) || type === "rate_limit_error") {
+    return "Rate limited by the AI provider. Wait a moment and try again.";
+  }
+  if (/authentication|invalid.*api.?key|unauthorized/i.test(msg) || type === "authentication_error") {
+    return "The AI provider rejected the API key. Check the key configured in Firebase Secrets.";
+  }
+  if (type === "overloaded_error" || /overloaded/i.test(msg)) {
+    return "The AI provider is overloaded right now. Please try again shortly.";
+  }
+  return "The AI provider request failed. Please try again.";
 }
 
 async function fetchWithRetry(url, options, retries = 2, backoffMs = 400) {
@@ -324,7 +352,16 @@ exports.llm = onRequest(
       if (Array.isArray(tools) && tools.length) {
         const info = modelInfo(model);
         const isKnownSearchTool = (t) => t && t.type === "web_search_20250305" && t.name === "web_search";
-        if (info && info.webSearch && tools.every(isKnownSearchTool)) safeTools = tools;
+        if (info && info.webSearch && tools.every(isKnownSearchTool)) {
+          // Rebuild the tool server-side rather than forwarding the client's
+          // object. Search is billed per use ($10/1k) on top of the tokens for
+          // every page pulled into context, so max_uses is a spend control and
+          // can't be left to the caller — an uncapped call was observed doing
+          // 22 searches and loading 181 pages.
+          const requested = Number(tools[0].max_uses);
+          const max_uses = Math.min(Number.isFinite(requested) && requested > 0 ? requested : MAX_SEARCH_USES, MAX_SEARCH_USES);
+          safeTools = [{ type: "web_search_20250305", name: "web_search", max_uses }];
+        }
       }
 
       const tryKey = (secret) => { try { return secret.value(); } catch (_) { return ""; } };
@@ -350,13 +387,13 @@ exports.llm = onRequest(
 
       if (data.error) {
         console.error("Provider error for model " + model + ":", JSON.stringify(data.error));
-        // Hide upstream error detail from real callers (could leak internals),
-        // but surface it directly when running in the emulator — guessing at
-        // a provider error from a generic message during local debugging
-        // wastes more time than it protects.
         const isEmulator = process.env.FUNCTIONS_EMULATOR === "true";
         res.status(502).json({
-          error: "The AI provider request failed. Please try again.",
+          // Most upstream detail stays hidden (it can leak internals), but
+          // some failures are the operator's to fix and are actively
+          // misleading when reported as "try again" — an exhausted credit
+          // balance cost real debugging time being reported that way.
+          error: describeProviderError(data.error),
           ...(isEmulator ? { debug: data.error } : {}),
         });
         return;

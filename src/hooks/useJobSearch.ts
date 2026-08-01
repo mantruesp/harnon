@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { callClaude, checkUrls, extractJson } from "../api/client";
 import type { CallClaudeOptions } from "../api/client";
-import type { BatchProgress, JobPosting, ResumeAnalysis, SearchPhase } from "../types";
+import type { BatchProgress, JobPosting, ResumeAnalysis, SearchPhase, UrlCheckResult } from "../types";
 
 function jobKey(j: Pick<JobPosting, "title" | "company">): string {
   return (j.title || "").toLowerCase().trim() + "|" + (j.company || "").toLowerCase().trim();
@@ -76,7 +76,12 @@ export function useJobSearch(
       maxTokens: 4096,
       model: selectedModel,
     };
-    if (hasWebSearch) opts.tools = [{ type: "web_search_20250305", name: "web_search" }];
+    // max_uses matters a lot: without it Claude decides how many searches to
+    // run, and production logs showed a single call doing 22 searches and
+    // pulling 181 pages into context. At $10/1k searches plus the tokens for
+    // all that content, an uncapped multi-batch run can cost dollars per
+    // click. 5 is plenty to find 10 postings.
+    if (hasWebSearch) opts.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }];
     const { text, groundedUrls } = await callClaude(opts);
     const arr = extractJson<any>(text);
     const jobs: JobPosting[] = Array.isArray(arr) ? arr : arr.jobs || [];
@@ -93,42 +98,44 @@ export function useJobSearch(
     return jobs.map((j) => (j.postingUrl && !grounded.has(normalizeUrl(j.postingUrl)) ? { ...j, postingUrl: "" } : j));
   }
 
-  async function verifyBatch(cands: JobPosting[]): Promise<{ openOnes: JobPosting[]; unconfirmedOnes: JobPosting[]; hidden: number }> {
-    // Without web search we can't verify live — pass all through as unverified
-    if (!hasWebSearch) {
-      return { openOnes: cands.map((j) => ({ ...j, status: "unverified" as const, checkedNote: "No live search on this model" })), unconfirmedOnes: [], hidden: 0 };
-    }
-    const today = new Date().toISOString().slice(0, 10);
-    const verifyInstruction =
-      "Today is " + today + ". Use web search to verify whether each of these job postings is REAL and STILL ACCEPTING APPLICATIONS right now. " +
-      "For each, search the role + company (and the posting URL if useful) and judge whether it is still live — not filled, expired, or removed. " +
-      "Respond with ONLY a JSON array. Keep the same order and ADD to each item: " +
-      '"status":"open"|"closed"|"unconfirmed" and "checkedNote":string(short reason, e.g. "Active on LinkedIn, posted recently" or "Listing no longer found"). ' +
-      "Mark \"open\" ONLY when search results support that it is still accepting applications. If evidence is missing, use \"unconfirmed\". Never guess \"open\". " +
-      "Postings to verify: " +
-      JSON.stringify(cands.map((j) => ({ title: j.title, company: j.company, location: j.location, postingUrl: j.postingUrl, source: j.source })));
-    let verified: any[] = [];
-    try {
-      const { text: vtext } = await callClaude({
-        content: verifyInstruction,
-        system: "You verify job postings against live web results. Never mark a posting open unless the search results support it.",
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        maxTokens: 4096,
-        model: selectedModel,
-      });
-      const varr = extractJson<any>(vtext);
-      verified = Array.isArray(varr) ? varr : varr.jobs || [];
-    } catch (e) { verified = []; }
-    const byKey: Record<string, any> = {};
-    verified.forEach((v) => { byKey[jobKey(v)] = v; });
+  // Sorts candidates using ONLY the cheap, deterministic HTTP link check.
+  //
+  // This replaces what used to be a second web-search LLM call per batch that
+  // asked the model to judge whether each posting was "still open". That call
+  // doubled the cost and latency of every batch while producing the weakest
+  // signal in the pipeline (a model inferring open-ness from search snippets),
+  // and it was strictly instructed never to guess "open" — so most real jobs
+  // came back "unconfirmed" anyway. The HTTP check already proves the harder,
+  // more useful fact: the link resolves to a live page.
+  //
+  // Honest about what each bucket means:
+  //   ok:true  -> the posting URL loads (main list)
+  //   ok:null  -> couldn't confirm; the site blocked the check (403/429) or
+  //               timed out. NOT evidence the job is gone, so these are shown
+  //               in the collapsible tier rather than discarded — this is what
+  //               was wrongly dropping ZipRecruiter/Indeed/LinkedIn results.
+  //   ok:false -> a real 404/410/5xx. Genuinely dead; dropped.
+  function sortByLinkHealth(
+    cands: JobPosting[],
+    results: UrlCheckResult[],
+  ): { openOnes: JobPosting[]; unconfirmedOnes: JobPosting[]; hidden: number } {
+    const byUrl = new Map(results.map((r) => [r.url, r]));
     const openOnes: JobPosting[] = [];
     const unconfirmedOnes: JobPosting[] = [];
     let hidden = 0;
     cands.forEach((j) => {
-      const v = byKey[jobKey(j)];
-      if (v && v.status === "open") openOnes.push({ ...j, status: "open", checkedNote: v.checkedNote || "" });
-      else if (v && v.status === "closed") hidden++; // confirmed no longer accepting applications — genuinely not worth showing
-      else unconfirmedOnes.push({ ...j, status: "unconfirmed", checkedNote: (v && v.checkedNote) || "Couldn't confirm this is still open." });
+      const r = byUrl.get(j.postingUrl);
+      if (r && r.ok === true) {
+        openOnes.push({ ...j, status: "open", checkedNote: "Link verified" });
+      } else if (r && r.ok === false) {
+        hidden++; // confirmed dead link — the Boeing-404 case
+      } else {
+        unconfirmedOnes.push({
+          ...j,
+          status: "unconfirmed",
+          checkedNote: r?.status ? `Site blocked the link check (HTTP ${r.status})` : "Couldn't reach the link to check it",
+        });
+      }
     });
     return { openOnes, unconfirmedOnes, hidden };
   }
@@ -141,7 +148,10 @@ export function useJobSearch(
     const acc = [...seed];
     if (acc.length === 0) setJobs([]); // render the results section immediately
     let emptyStreak = 0, batches = 0;
-    const MAX_BATCHES = 14;
+    // Each batch is now ONE search call (was two), capped at 5 searches, so
+    // a full run is bounded at roughly 6 calls / 30 searches instead of the
+    // previous worst case of ~28 calls and several hundred searches.
+    const MAX_BATCHES = 6;
     setBatchProgress({ n: 0, max: MAX_BATCHES });
     while (acc.length < targetCount && batches < MAX_BATCHES && !stopRef.current) {
       batches++;
@@ -153,24 +163,20 @@ export function useJobSearch(
       if (stopRef.current) break;
       cand = (cand || []).filter((c) => !acc.some((a) => jobKey(a) === jobKey(c)));
       if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 3) break; continue; }
-      // Only positions with a POSITIVELY CONFIRMED working link get shown —
-      // a job with no URL, a confirmed-dead one (404/410/5xx), or one we
-      // simply couldn't confirm (blocked by the site's bot detection, a
-      // timeout, or the check itself failing) are all dropped here. This is
-      // deliberately strict: inconclusive is not the same as working, so it
-      // no longer passes.
+      // A job with no usable URL can't be applied to, so it's still dropped.
       cand = cand.filter((c) => c.postingUrl);
       if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 3) break; continue; }
-      try {
-        const urlResults = await checkUrls(cand.map((c) => c.postingUrl));
-        const goodUrls = new Set(urlResults.filter((r) => r.ok === true).map((r) => r.url));
-        cand = cand.filter((c) => goodUrls.has(c.postingUrl));
-      } catch (e) {
-        cand = []; // couldn't even run the check — nothing here is confirmed, so nothing qualifies
-      }
-      if (cand.length === 0) { emptyStreak++; if (emptyStreak >= 3) break; continue; }
       setSearchPhase("verifying");
-      const { openOnes, unconfirmedOnes, hidden } = await verifyBatch(cand);
+      let urlResults: UrlCheckResult[] = [];
+      try {
+        urlResults = await checkUrls(cand.map((c) => c.postingUrl));
+      } catch (e) { urlResults = []; }
+      // Free models can't be link-checked meaningfully (no live search means
+      // the URLs are training-data recall), so they keep the honest
+      // "unverified" label rather than claiming a verified link.
+      const { openOnes, unconfirmedOnes, hidden } = hasWebSearch
+        ? sortByLinkHealth(cand, urlResults)
+        : { openOnes: cand.map((j) => ({ ...j, status: "unverified" as const, checkedNote: "No live search on this model" })), unconfirmedOnes: [], hidden: 0 };
       if (stopRef.current) break;
       const before = acc.length;
       openOnes.forEach((o) => { if (!acc.some((a) => jobKey(a) === jobKey(o))) acc.push(o); });

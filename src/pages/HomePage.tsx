@@ -225,7 +225,7 @@ export default function HomePage({ autoLoadId }: { autoLoadId?: string }) {
         {jobSearch.jobs && (
           <section style={{ marginBottom: 18 }}>
             <div className="eyebrow" style={{ marginBottom: 10 }}>
-              Step 3 — {jobSearch.jobs.length} confirmed open{jobSearch.searching ? " · finding more…" : " · apply"}
+              Step 3 — {jobSearch.jobs.length} with verified links{jobSearch.searching ? " · finding more…" : " · apply"}
             </div>
             {jobSearch.jobs.length === 0 && jobSearch.searching && (
               <div className="card" style={{ padding: 20, fontSize: 14, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -235,7 +235,7 @@ export default function HomePage({ autoLoadId }: { autoLoadId?: string }) {
             )}
             {jobSearch.jobs.length === 0 && !jobSearch.searching && (
               <div className="card" style={{ padding: 20, fontSize: 14 }}>
-                Nothing came back that we could confirm is still open{jobSearch.hiddenCount > 0 ? " (" + jobSearch.hiddenCount + " confirmed closed and left out)" : ""}. Try turning off the visa filter or broadening the location, then search again.
+                No matches with a working link came back{jobSearch.hiddenCount > 0 ? " (" + jobSearch.hiddenCount + " had dead links and were left out)" : ""}. Try turning off the visa filter or broadening the location, then search again.
               </div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -259,10 +259,10 @@ export default function HomePage({ autoLoadId }: { autoLoadId?: string }) {
             {jobSearch.unconfirmedJobs.length > 0 && (
               <div style={{ marginTop: 16 }}>
                 <button className="btn btn-ghost btn-sm" onClick={() => jobSearch.setShowUnconfirmed((s) => !s)}>
-                  {jobSearch.showUnconfirmed ? "Hide" : "Show"} {jobSearch.unconfirmedJobs.length} unconfirmed match{jobSearch.unconfirmedJobs.length > 1 ? "es" : ""} {jobSearch.showUnconfirmed ? "▴" : "▾"}
+                  {jobSearch.showUnconfirmed ? "Hide" : "Show"} {jobSearch.unconfirmedJobs.length} unverified link{jobSearch.unconfirmedJobs.length > 1 ? "s" : ""} {jobSearch.showUnconfirmed ? "▴" : "▾"}
                 </button>
                 <p style={{ fontSize: 11.5, color: "var(--muted)", margin: "6px 0 0" }}>
-                  These looked like real matches but a live check couldn't confirm they're still accepting applications — worth a manual look rather than discarding.
+                  These are real matches whose link couldn't be checked automatically — big job boards like LinkedIn and Indeed block automated requests. The links are probably fine; they just couldn't be confirmed from our server.
                 </p>
                 {jobSearch.showUnconfirmed && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
@@ -274,9 +274,9 @@ export default function HomePage({ autoLoadId }: { autoLoadId?: string }) {
 
             <p style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12 }}>
               {jobSearch.jobs.length > 0 && jobSearch.hiddenCount > 0 && (
-                <>Left out {jobSearch.hiddenCount} listing{jobSearch.hiddenCount > 1 ? "s" : ""} confirmed no longer accepting applications. </>
+                <>Left out {jobSearch.hiddenCount} listing{jobSearch.hiddenCount > 1 ? "s" : ""} whose link was dead (404). </>
               )}
-              Roles above are verified as currently open, but postings can close at any time — reconfirm on the employer's site before applying.
+              A verified link means the posting page loads — not that the role is still accepting applications. Confirm on the employer's site before applying.
             </p>
           </section>
         )}

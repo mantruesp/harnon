@@ -13,7 +13,12 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://127.0.0.1:5050", changeOrigin: true },
+      // Search/verify calls use web_search with multiple tool iterations and
+      // can legitimately take well over a minute. Vite's dev proxy (http-proxy
+      // under the hood) has a default timeout well short of that, and returns
+      // a 504 to the browser once it gives up — before the real response ever
+      // arrives. Match this to the Cloud Function's own timeoutSeconds (300).
+      "/api": { target: "http://127.0.0.1:5050", changeOrigin: true, timeout: 300_000, proxyTimeout: 300_000 },
     },
   },
   build: { outDir: "dist" },

@@ -23,7 +23,7 @@ export default function JobCard({
                 {job.source ? " · " + job.source : ""}
               </div>
               <div style={{ fontSize: 12, color: job.status === "open" ? "var(--good)" : "var(--warn)", fontWeight: 600, marginTop: 4 }}>
-                {job.status === "open" ? "✓ Confirmed open" : job.status === "unconfirmed" ? "◐ Not confirmed open" : "◐ Unverified (no live search)"}
+                {job.status === "open" ? "✓ Link verified" : job.status === "unconfirmed" ? "◐ Link not verifiable" : "◐ Unverified (no live search)"}
                 {job.checkedNote ? " · " + job.checkedNote : ""}
               </div>
             </div>
