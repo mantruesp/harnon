@@ -41,10 +41,23 @@ const PROVIDERS = {
     // why it's cheap by default). Sending either param to it breaks the request,
     // so every model that can be routed to must declare what it accepts.
     models: [
-      { id: "claude-sonnet-5",  label: "Claude Sonnet 5",  free: false, webSearch: true,  adaptiveThinking: true,  effort: true },
-      { id: "claude-opus-4-8",  label: "Claude Opus 4.8",  free: false, webSearch: true,  adaptiveThinking: true,  effort: true },
-      { id: "claude-sonnet-4-6",label: "Claude Sonnet 4.6", free: false, webSearch: true, adaptiveThinking: true,  effort: true },
-      { id: "claude-haiku-4-5", label: "Claude Haiku 4.5",  free: false, webSearch: true, adaptiveThinking: false, effort: false },
+      // searchTool is per-model because the dynamic-filtering variant
+      // (`web_search_20260209`) needs Opus 4.6+/Sonnet 4.6+ — Haiku 4.5
+      // predates it and would reject the request.
+      //
+      // Everything is deliberately on basic search: dynamic filtering is
+      // documented to cut tokens by filtering results before they reach the
+      // context window, but a measured A/B on identical prompts did not
+      // reproduce that here — per search the input cost was about the same
+      // (~12k tokens either way) and the code-execution machinery added ~3x
+      // the output tokens. It also nests the grounding blocks, adding risk to
+      // the one path that must not fail open. Flip these back to
+      // "web_search_20260209" only alongside a measurement that shows a win
+      // on a realistic job-search prompt.
+      { id: "claude-sonnet-5",  label: "Claude Sonnet 5",  free: false, webSearch: true,  adaptiveThinking: true,  effort: true,  searchTool: "web_search_20250305" },
+      { id: "claude-opus-4-8",  label: "Claude Opus 4.8",  free: false, webSearch: true,  adaptiveThinking: true,  effort: true,  searchTool: "web_search_20250305" },
+      { id: "claude-sonnet-4-6",label: "Claude Sonnet 4.6", free: false, webSearch: true, adaptiveThinking: true,  effort: true,  searchTool: "web_search_20250305" },
+      { id: "claude-haiku-4-5", label: "Claude Haiku 4.5",  free: false, webSearch: true, adaptiveThinking: false, effort: false, searchTool: "web_search_20250305" },
     ],
   },
   groq: {
@@ -210,15 +223,27 @@ async function fetchWithRetry(url, options, retries = 2, backoffMs = 400) {
 // seen in search results, not invented or altered by the model afterward.
 function extractGroundedUrls(content) {
   const urls = new Set();
-  for (const block of content || []) {
-    if (block && block.type === "web_search_tool_result" && Array.isArray(block.content)) {
-      for (const item of block.content) {
-        if (item && item.type === "web_search_result" && typeof item.url === "string") {
-          urls.add(item.url);
-        }
-      }
+  // Walks the whole block tree rather than just the top level. With the basic
+  // search tool the results sit directly in `content`; with dynamic filtering
+  // (web_search_20260209) the search runs *inside* code execution, so the
+  // `web_search_tool_result` blocks arrive nested one or more levels down.
+  // A top-level-only scan would silently find nothing there — and an empty
+  // grounding set doesn't fail loudly, it just quietly rejects every URL.
+  // Matching `web_search_result` at any depth is robust to both shapes and to
+  // future nesting changes.
+  const seen = new Set();
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (seen.has(node)) return; // cycle guard
+    seen.add(node);
+    if (Array.isArray(node)) { for (const item of node) walk(item); return; }
+    if (node.type === "web_search_result" && typeof node.url === "string") urls.add(node.url);
+    for (const key of Object.keys(node)) {
+      const v = node[key];
+      if (v && typeof v === "object") walk(v);
     }
-  }
+  };
+  walk(content);
   return Array.from(urls);
 }
 
@@ -391,7 +416,13 @@ exports.llm = onRequest(
       let safeTools;
       if (Array.isArray(tools) && tools.length) {
         const info = modelInfo(model);
-        const isKnownSearchTool = (t) => t && t.type === "web_search_20250305" && t.name === "web_search";
+        // The client asks for "web search"; the server decides which version.
+        // Accepting either type keeps old clients working, and the version
+        // actually sent is chosen from the resolved model's capability, so a
+        // model that can't do dynamic filtering never receives that request.
+        const isKnownSearchTool = (t) =>
+          t && t.name === "web_search" &&
+          (t.type === "web_search_20250305" || t.type === "web_search_20260209");
         if (info && info.webSearch && tools.every(isKnownSearchTool)) {
           // Rebuild the tool server-side rather than forwarding the client's
           // object. Search is billed per use ($10/1k) on top of the tokens for
@@ -400,7 +431,7 @@ exports.llm = onRequest(
           // 22 searches and loading 181 pages.
           const requested = Number(tools[0].max_uses);
           const max_uses = Math.min(Number.isFinite(requested) && requested > 0 ? requested : MAX_SEARCH_USES, MAX_SEARCH_USES);
-          safeTools = [{ type: "web_search_20250305", name: "web_search", max_uses }];
+          safeTools = [{ type: info.searchTool || "web_search_20250305", name: "web_search", max_uses }];
         }
       }
 

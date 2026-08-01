@@ -520,15 +520,62 @@ and both put volatile content first. Reordering is cheap insurance and worth
 doing, but at typical resume length it would not have saved money — the
 earlier §0 note that caching wasn't worth it holds, now with numbers behind it.
 
-**Phase 2, deliberately deferred:** upgrading `web_search_20250305` →
-`web_search_20260209`, which adds **dynamic filtering** (Claude filters results
-before they enter the context window) and targets the single biggest cost —
-search results dominating input tokens; one call was observed pulling 181 pages
-in. Held back because with dynamic filtering the `web_search_tool_result`
-blocks become *nested* inside code-execution results, and `extractGroundedUrls`
-only walks top-level blocks — shipping it blind would silently break the
-grounding check, and a grounding check that fails open is the exact bug class
-§0.1–§0.9 were spent fixing. Needs verification against a real response first.
+### 0.11 Token-cost pass, phase 2: dynamic filtering measured, and NOT adopted
+
+Phase 2 was to upgrade `web_search_20250305` → `web_search_20260209`, which
+adds **dynamic filtering** (Claude writes code that filters search results
+before they reach the context window). On paper this was the single biggest
+lever available: search results dominate this app's input tokens, and one
+production call was observed pulling 181 pages into context.
+
+**It was implemented, measured, and then reverted — the promised saving did
+not reproduce.** A/B on identical prompts, same model (`claude-sonnet-5`),
+same `max_uses: 2`, same `effort`:
+
+| Tool | input tokens | output tokens | searches run | grounded URLs |
+|---|---|---|---|---|
+| `web_search_20250305` (basic) | 12,153 | 105 | 1 | 9 |
+| `web_search_20260209` (dynamic) | 25,661 | 304 | 2 | 9 |
+
+Read carefully, this is **not** a 2× regression: the two arms ran a different
+number of searches (the dynamic call chose to search twice), so per search the
+input cost is roughly equal — ~12.1k vs ~12.8k tokens. What is unambiguous is
+that dynamic filtering produced **~3× the output tokens**, because the
+code-execution machinery it runs on (`server_tool_use` → `code_execution`
+→ `encrypted_code_execution_result` blocks) is itself billed output.
+
+Caveats stated plainly: n=1 per arm, differing search counts, and a short
+generic prompt rather than the real job-search prompt — dynamic filtering
+should help most when results are large and mostly irrelevant, which a
+two-result toy query doesn't exercise. So this measurement **cannot** conclude
+dynamic filtering is worse in general; it only establishes that the expected
+saving did not appear under test.
+
+**Decision: keep basic search.** The entire justification for the change was a
+token saving that couldn't be demonstrated, and it carries real cost — it
+nests the grounding blocks inside code-execution results, adding failure
+surface to the one path that must not fail open (§0.1–§0.9 exist because that
+path failing open shipped hallucinated links). Adopting unproven complexity on
+the grounding path is the wrong trade. All models are pinned to
+`web_search_20250305`, with the finding recorded in-code next to the flag so a
+future flip is one constant away — but only alongside a measurement on a
+realistic prompt that shows a win.
+
+**Kept from the phase-2 work, because it is strictly better regardless:**
+`extractGroundedUrls()` is now a recursive walk that matches
+`web_search_result` at *any* depth, rather than scanning only top-level
+blocks. This is the safety-critical piece: an empty grounding set doesn't fail
+loudly, it silently rejects every URL, so the extractor should never be
+coupled to one particular response shape. Unit-tested at zero API cost against
+four shapes — flat (basic tool), nested (dynamic filtering), the
+error variant where `content` is an object rather than an array, and a
+self-referential object (cycle guard). Verified live too: the one dynamic
+call extracted all 9 URLs correctly through the nested shape.
+
+**Testing cost discipline:** the whole phase used 3 API calls — one structural
+probe and two A/B arms — with `max_uses: 2` and `max_tokens: 500`, plus a
+free unit test for the extractor and a free outbound-body inspection (in
+phase 1) that verified request shaping without a valid billing state.
 
 ---
 
