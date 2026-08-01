@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "chrome",
+      "request": "launch",
+      "name": "Debug Harnon (frontend, Chrome)",
+      "url": "http://localhost:5173",
+      "webRoot": "${workspaceFolder}",
+      "sourceMaps": true,
+      "preLaunchTask": "vite: dev"
+    },
+    {
+      "type": "node",
+      "request": "attach",
+      "name": "Attach: Functions emulator",
+      "port": 9229,
+      "restart": true,
+      "cwd": "${workspaceFolder}/functions",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}
