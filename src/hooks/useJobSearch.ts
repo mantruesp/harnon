@@ -135,7 +135,7 @@ export function useJobSearch(
       if (r && r.ok === true) {
         openOnes.push({ ...j, status: "open", checkedNote: "Link verified" });
       } else if (r && r.ok === false) {
-        hidden++; // confirmed dead link — the Boeing-404 case
+        hidden++; // dead link (Boeing-404 case), or the page itself says the role is filled/closed
       } else {
         unconfirmedOnes.push({
           ...j,

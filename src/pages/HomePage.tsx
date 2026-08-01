@@ -235,7 +235,7 @@ export default function HomePage({ autoLoadId }: { autoLoadId?: string }) {
             )}
             {jobSearch.jobs.length === 0 && !jobSearch.searching && (
               <div className="card" style={{ padding: 20, fontSize: 14 }}>
-                No matches with a working link came back{jobSearch.hiddenCount > 0 ? " (" + jobSearch.hiddenCount + " had dead links and were left out)" : ""}. Try turning off the visa filter or broadening the location, then search again.
+                No matches with a working, still-open link came back{jobSearch.hiddenCount > 0 ? " (" + jobSearch.hiddenCount + " were dead links or already-filled roles)" : ""}. Try turning off the visa filter or broadening the location, then search again.
               </div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -274,7 +274,7 @@ export default function HomePage({ autoLoadId }: { autoLoadId?: string }) {
 
             <p style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12 }}>
               {jobSearch.jobs.length > 0 && jobSearch.hiddenCount > 0 && (
-                <>Left out {jobSearch.hiddenCount} listing{jobSearch.hiddenCount > 1 ? "s" : ""} whose link was dead (404). </>
+                <>Left out {jobSearch.hiddenCount} listing{jobSearch.hiddenCount > 1 ? "s" : ""} whose link was dead, or whose page says the role is filled or no longer accepting applications. </>
               )}
               A verified link means the posting page loads — not that the role is still accepting applications. Confirm on the employer's site before applying.
             </p>

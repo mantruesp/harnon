@@ -577,6 +577,62 @@ probe and two A/B arms — with `max_uses: 2` and `max_tokens: 500`, plus a
 free unit test for the extractor and a free outbound-body inspection (in
 phase 1) that verified request shaping without a valid billing state.
 
+### 0.12 Two production bugs found by finally testing against prod
+
+Both surfaced from the first end-to-end run against the deployed app rather
+than a component in isolation — which is exactly why that run was worth doing.
+
+**Bug 1 — searches were 502'ing at the hosting layer.** A real search against
+production returned a Google **`Error 502 (Server Error)` HTML page**, and a
+retry of the same request took **53.7s**. Requests reach Cloud Functions
+through a Firebase Hosting rewrite, and that hop times out well below the
+function's own `timeoutSeconds: 300` — so the generous function timeout was
+never the operative limit. With `MAX_SEARCH_USES: 5` a call ran 35–54s, right
+at the edge, and some crossed it.
+
+Two failure modes made this worse than a plain error: the body is **HTML**, so
+the client's `res.json()` threw and the real cause was swallowed; and the
+user-visible message was a bare status code they could do nothing with.
+
+Fixed by attacking the cause rather than the symptom — `MAX_SEARCH_USES`
+5 → 3, since each search adds roughly 7–10s and three pulls a call back to
+~25–35s with headroom. This also cuts cost, so it's the rare change that
+helps both. `callClaude` now reports 502/504 as a timeout in plain language
+instead of failing to parse an HTML error page. Raising the cap again trades
+real reliability for marginally more results.
+
+**Bug 2 — a 200 doesn't mean the job is open.** User-reported: every link in
+a search resolved fine, but every role was already filled. Job boards keep
+filled and expired postings at their original URL and just change the copy,
+so the HTTP check — which only ever proved the *page* loads — could not catch
+it.
+
+`checkOneUrl` already issued a GET, so the page body was there and simply
+unread. It now reads it (bounded to 400KB, HTML content-types only), strips
+scripts/styles/tags so matching runs against **visible copy rather than
+markup**, and looks for high-confidence closed-posting phrases. A match
+returns `ok: false, reason: "closed"`, so those jobs drop exactly like dead
+links.
+
+The whole risk here is false positives — a wrongly-flagged phrase silently
+drops a good job, which is the same recall failure §0.2/§0.3 caused. So the
+phrase list is deliberately short and unambiguous: bare "closed" and
+"expired" are **excluded**, because they appear in "closed captioning",
+"our office is closed", and "your session may have expired". Verified 8/8 on
+a table covering both directions, including three synthetic closed pages and
+five false-positive traps (phrase inside `<script>`, phrase inside a markup
+attribute, and the three innocuous-wording cases above). Then verified
+against five real URLs: the known-dead Boeing posting still drops as
+`not-found`, and four live pages (example.com, Greenhouse, LinkedIn, Ashby)
+all pass clean — **no false positives**.
+
+**Known limitation:** the true-positive path is proven on synthetic HTML but
+not yet against a real filled posting in the wild, since no live closed URL
+was on hand at the time. The phrase list will need widening as real boards
+show up in the logs — `reason: "closed"` carries the matched `marker` field
+specifically so those decisions are auditable after the fact rather than
+invisible.
+
 ---
 
 ### 0.9 Local-dev 403 chased down to two real causes, plus a port move

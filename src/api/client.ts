@@ -104,11 +104,17 @@ export async function callClaude({ system, content, tools, maxTokens = 4096, mod
     body: JSON.stringify({ system, content, tools, max_tokens: maxTokens, model, thinking, effort, tier }),
   });
   if (!res.ok) {
-    let msg = "The request failed (" + res.status + "). Please try again.";
+    // 502/504 here generally aren't our backend answering — they're the
+    // hosting layer giving up on a long search and returning an HTML error
+    // page, which json() can't parse. Say that plainly instead of showing a
+    // bare status code the user can't act on.
+    let msg = res.status === 502 || res.status === 504
+      ? "The search took too long and the connection timed out before results came back. Please try again."
+      : "The request failed (" + res.status + "). Please try again.";
     try {
       const j = await res.json();
       if (j && j.error) msg = typeof j.error === "string" ? j.error : (j.error.message || msg);
-    } catch (_) { /* ignore body-parse failure, keep default msg */ }
+    } catch (_) { /* HTML error page, not JSON — keep the message above */ }
     throw new Error(msg);
   }
   const data = await res.json();

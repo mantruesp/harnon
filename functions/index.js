@@ -112,7 +112,15 @@ const ALLOWED_ORIGINS = new Set([
 // Hard ceiling on web searches per request. Search bills per use on top of
 // the tokens for every page it pulls into context, so this is the single
 // most effective spend control in the app.
-const MAX_SEARCH_USES = 5;
+//
+// It is also a LATENCY control, which is why it's 3 rather than 5. Requests
+// reach Cloud Functions through a Firebase Hosting rewrite, and that hop has
+// its own ceiling well below the function's own 300s timeout: measured
+// against production, a 5-search call took 35-54s and one returned a Google
+// "Error 502 (Server Error)" HTML page instead of a response. Each search
+// adds roughly 7-10s, so trimming to 3 pulls a full call back to ~25-35s with
+// headroom. Raising this trades real reliability for marginally more results.
+const MAX_SEARCH_USES = 3;
 
 const MAX_CONTENT_CHARS = 8_000_000; // generous ceiling: a multi-page PDF resume as base64 + prompt text
 const MAX_SYSTEM_CHARS = 20_000;
@@ -523,6 +531,58 @@ exports.claude = exports.llm;
 
 const CHECK_URL_MAX = 20;
 const CHECK_URL_TIMEOUT_MS = 10000;
+// Cap how much HTML we read looking for a closed-posting marker. The phrases
+// live in the visible copy near the top of the page; pulling whole multi-MB
+// documents would add latency for nothing.
+const CHECK_URL_MAX_BODY_BYTES = 400_000;
+
+// A 200 only proves the page loads — job boards routinely keep a filled or
+// expired posting at its original URL and simply change the copy. That's the
+// gap this closes: the user reported links that resolved fine but were all
+// dead roles.
+//
+// Every phrase here has to be one that a LIVE posting would not contain, and
+// the cost of a false positive is real (a good job silently dropped), so this
+// list is deliberately short and unambiguous. Generic words like "closed" or
+// "expired" alone are NOT here — "closed" appears in "closed captioning" and
+// in office-location copy, "expired" in cookie notices.
+const CLOSED_POSTING_PHRASES = [
+  "no longer accepting application",   // matches "...applications" too
+  "no longer available",
+  "no longer accepting candidate",
+  "no longer open",
+  "position has been filled",
+  "this position is closed",
+  "this job is closed",
+  "job posting has expired",
+  "this posting has expired",
+  "this job has expired",
+  "posting is no longer active",
+  "applications are now closed",
+  "we are no longer hiring for this",
+  "this role has been filled",
+  "vacancy is closed",
+];
+
+// Strips tags/scripts so phrase matching runs against visible copy rather than
+// markup — a phrase buried in a JSON blob or a hidden template shouldn't count.
+function visibleText(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function findClosedMarker(html) {
+  const text = visibleText(html);
+  for (const phrase of CLOSED_POSTING_PHRASES) {
+    if (text.includes(phrase)) return phrase;
+  }
+  return null;
+}
 
 // Basic SSRF guard: this endpoint fetches whatever URL a client sends, so
 // refuse anything that resolves to loopback/link-local/private ranges rather
@@ -573,7 +633,24 @@ async function checkOneUrl(url) {
     // we couldn't confirm it — tracked distinctly from a confirmed-dead
     // link, even though both currently fail to qualify as a "good" match.
     if ([401, 403, 429, 999].includes(r.status)) return { url, ok: null, status: r.status, reason: "blocked" };
-    if (r.status >= 200 && r.status < 400) return { url, ok: true, status: r.status, reason: "" };
+    if (r.status >= 200 && r.status < 400) {
+      // The page loads — now check whether the ROLE is actually still open.
+      // Only inspect HTML; a PDF or JSON response has no such copy to read.
+      const ctype = (r.headers.get("content-type") || "").toLowerCase();
+      if (ctype.includes("html")) {
+        try {
+          const buf = await r.arrayBuffer();
+          const html = Buffer.from(buf).subarray(0, CHECK_URL_MAX_BODY_BYTES).toString("utf8");
+          const marker = findClosedMarker(html);
+          if (marker) return { url, ok: false, status: r.status, reason: "closed", marker };
+        } catch (_) {
+          // Body unreadable (encoding, truncated stream) — fall through and
+          // treat the 200 as reachable. Failing to read the page is not
+          // evidence the role is gone.
+        }
+      }
+      return { url, ok: true, status: r.status, reason: "" };
+    }
     return { url, ok: null, status: r.status, reason: "unknown" };
   } catch (e) {
     return { url, ok: null, status: null, reason: "network-error" };
