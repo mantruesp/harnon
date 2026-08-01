@@ -23,16 +23,28 @@ const ALL_SECRETS = [ANTHROPIC_API_KEY, GROQ_API_KEY, GEMINI_API_KEY];
 
 const DEFAULT_MODEL = "claude-sonnet-5";
 
+// Cheapest Anthropic model — $1/$5 per MTok vs Sonnet 5's $3/$15. Used for the
+// mechanical extraction step, which doesn't need frontier reasoning. Only ever
+// substituted for another Anthropic model: a user who picked Groq or Gemini
+// keeps their provider.
+const CHEAP_ANTHROPIC_MODEL = "claude-haiku-4-5";
+const VALID_EFFORT = new Set(["low", "medium", "high", "xhigh", "max"]);
+
 // ──────────────────────── Provider configs ────────────────────────
 
 const PROVIDERS = {
   anthropic: {
     label: "Anthropic (Claude)",
+    // adaptiveThinking / effort are per-model API capabilities, not preferences.
+    // Haiku 4.5 predates both: `output_config.effort` returns a 400 there, and
+    // it has no adaptive thinking (it also doesn't think unless asked, which is
+    // why it's cheap by default). Sending either param to it breaks the request,
+    // so every model that can be routed to must declare what it accepts.
     models: [
-      { id: "claude-sonnet-5",  label: "Claude Sonnet 5",  free: false, webSearch: true },
-      { id: "claude-opus-4-8",  label: "Claude Opus 4.8",  free: false, webSearch: true },
-      { id: "claude-sonnet-4-6",label: "Claude Sonnet 4.6", free: false, webSearch: true },
-      { id: "claude-haiku-4-5", label: "Claude Haiku 4.5",  free: false, webSearch: true },
+      { id: "claude-sonnet-5",  label: "Claude Sonnet 5",  free: false, webSearch: true,  adaptiveThinking: true,  effort: true },
+      { id: "claude-opus-4-8",  label: "Claude Opus 4.8",  free: false, webSearch: true,  adaptiveThinking: true,  effort: true },
+      { id: "claude-sonnet-4-6",label: "Claude Sonnet 4.6", free: false, webSearch: true, adaptiveThinking: true,  effort: true },
+      { id: "claude-haiku-4-5", label: "Claude Haiku 4.5",  free: false, webSearch: true, adaptiveThinking: false, effort: false },
     ],
   },
   groq: {
@@ -210,7 +222,7 @@ function extractGroundedUrls(content) {
   return Array.from(urls);
 }
 
-async function callAnthropic(key, { system, content, tools, max_tokens, model }) {
+async function callAnthropic(key, { system, content, tools, max_tokens, model, thinking, effort }) {
   const body = {
     model: model || DEFAULT_MODEL,
     max_tokens: max_tokens || 4096,
@@ -218,6 +230,10 @@ async function callAnthropic(key, { system, content, tools, max_tokens, model })
   };
   if (system) body.system = system;
   if (tools)  body.tools  = tools;
+  // Both are pre-validated against this model's capabilities by the caller —
+  // never set either here without that check (see the llm handler).
+  if (thinking) body.thinking = thinking;
+  if (effort)   body.output_config = { effort };
 
   const r = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -232,10 +248,24 @@ async function callAnthropic(key, { system, content, tools, max_tokens, model })
   if (Array.isArray(data.content)) {
     const groundedUrls = extractGroundedUrls(data.content);
     data.groundedUrls = groundedUrls;
-    if (tools) {
-      const searchCount = data.usage?.server_tool_use?.web_search_requests ?? 0;
-      console.log("web_search: requests=" + searchCount + " groundedUrls=" + groundedUrls.length + " model=" + (model || DEFAULT_MODEL));
-    }
+    // One structured line per call, so "what does a search actually cost?" is a
+    // log query instead of an estimate. thinking_tokens is the one worth
+    // watching: it's billed as output and is invisible in the response body,
+    // so it can only be seen here.
+    const u = data.usage || {};
+    console.log(JSON.stringify({
+      evt: "llm_usage",
+      model: model || DEFAULT_MODEL,
+      effort: effort || "default",
+      thinking: thinking?.type || "default",
+      in: u.input_tokens ?? 0,
+      out: u.output_tokens ?? 0,
+      thinking_out: u.output_tokens_details?.thinking_tokens ?? 0,
+      cache_read: u.cache_read_input_tokens ?? 0,
+      cache_write: u.cache_creation_input_tokens ?? 0,
+      searches: u.server_tool_use?.web_search_requests ?? 0,
+      grounded_urls: groundedUrls.length,
+    }));
   }
   return data;
 }
@@ -335,9 +365,19 @@ exports.llm = onRequest(
       // Validate/clamp everything the client controls before it reaches a
       // paid provider — the client should never be able to pick an unknown
       // model, force on web search, or request an unbounded token budget.
-      const model = typeof body.model === "string" && body.model ? body.model : DEFAULT_MODEL;
-      const prov = providerFor(model);
+      let model = typeof body.model === "string" && body.model ? body.model : DEFAULT_MODEL;
+      let prov = providerFor(model);
       if (!prov) { res.status(400).json({ error: "Unknown model." }); return; }
+
+      // Per-task model routing. `tier: "cheap"` marks a call as mechanical
+      // (structured extraction) rather than quality-critical, letting it run on
+      // the cheapest model instead of whatever the user selected for the
+      // headline work. Only ever swaps within Anthropic — switching a Groq or
+      // Gemini user onto a paid model would be a surprise charge.
+      if (body.tier === "cheap" && prov === "anthropic" && model !== CHEAP_ANTHROPIC_MODEL) {
+        model = CHEAP_ANTHROPIC_MODEL;
+        prov = providerFor(model);
+      }
 
       const contentSize = JSON.stringify(content).length;
       if (contentSize > MAX_CONTENT_CHARS) { res.status(413).json({ error: "Request too large." }); return; }
@@ -364,6 +404,29 @@ exports.llm = onRequest(
         }
       }
 
+      // Thinking and effort are model-gated, and getting this wrong is a hard
+      // 400 rather than a degraded response — `output_config.effort` is
+      // rejected outright on Haiku 4.5, which has neither effort nor adaptive
+      // thinking. Since the model can be swapped by the tier routing above,
+      // capability is resolved against the FINAL model, and anything it can't
+      // accept is dropped rather than forwarded. A caller asking for a param
+      // the model lacks gets the model's default, never an error.
+      const info = modelInfo(model);
+      let thinking, effort;
+      if (prov === "anthropic" && info) {
+        // Sonnet 5 and later run adaptive thinking whenever `thinking` is
+        // omitted, so "disabled" has to be sent explicitly to turn it off —
+        // omitting the field is NOT the cheap path on these models.
+        if (body.thinking === "disabled" && info.adaptiveThinking) {
+          thinking = { type: "disabled" };
+        } else if (body.thinking === "adaptive" && info.adaptiveThinking) {
+          thinking = { type: "adaptive" };
+        }
+        if (typeof body.effort === "string" && VALID_EFFORT.has(body.effort) && info.effort) {
+          effort = body.effort;
+        }
+      }
+
       const tryKey = (secret) => { try { return secret.value(); } catch (_) { return ""; } };
 
       let data;
@@ -372,7 +435,7 @@ exports.llm = onRequest(
       } else if (prov === "gemini" && tryKey(GEMINI_API_KEY)) {
         data = await callGemini(tryKey(GEMINI_API_KEY), { system, content, max_tokens, model });
       } else if (prov === "anthropic" && tryKey(ANTHROPIC_API_KEY)) {
-        data = await callAnthropic(tryKey(ANTHROPIC_API_KEY), { system, content, tools: safeTools, max_tokens, model });
+        data = await callAnthropic(tryKey(ANTHROPIC_API_KEY), { system, content, tools: safeTools, max_tokens, model, thinking, effort });
       } else if (tryKey(ANTHROPIC_API_KEY)) {
         // Requested provider's key isn't configured — fall back to Anthropic.
         data = await callAnthropic(tryKey(ANTHROPIC_API_KEY), { system, content, tools: safeTools, max_tokens, model: DEFAULT_MODEL });

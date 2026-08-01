@@ -23,6 +23,17 @@ export interface CallClaudeOptions {
   tools?: ClaudeTool[];
   maxTokens?: number;
   model: string;
+  /**
+   * Sonnet 5 and later run adaptive thinking when this is omitted, and thinking
+   * is billed as output — so "disabled" must be sent explicitly to turn it off.
+   * Leave it on for calls that use tools: per Anthropic, a thinking-disabled
+   * Sonnet 5 is measurably less likely to reach for the search tool.
+   */
+  thinking?: "disabled" | "adaptive";
+  /** Lower effort = fewer tokens. Silently ignored by models without it (Haiku 4.5). */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /** "cheap" routes mechanical work to the cheapest model of the same provider. */
+  tier?: "cheap";
 }
 
 // When a model hits its token limit mid-array, salvage whatever complete
@@ -86,11 +97,11 @@ export interface CallClaudeResult {
   groundedUrls: string[];
 }
 
-export async function callClaude({ system, content, tools, maxTokens = 4096, model }: CallClaudeOptions): Promise<CallClaudeResult> {
+export async function callClaude({ system, content, tools, maxTokens = 4096, model, thinking, effort, tier }: CallClaudeOptions): Promise<CallClaudeResult> {
   const res = await fetch(API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ system, content, tools, max_tokens: maxTokens, model }),
+    body: JSON.stringify({ system, content, tools, max_tokens: maxTokens, model, thinking, effort, tier }),
   });
   if (!res.ok) {
     let msg = "The request failed (" + res.status + "). Please try again.";

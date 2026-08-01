@@ -75,6 +75,13 @@ export function useJobSearch(
           : "Return the best real postings you know of with real company career-page or LinkedIn URLs. Use your training data since live search is not available."),
       maxTokens: 4096,
       model: selectedModel,
+      // Deliberately NOT disabling thinking here, unlike the other two calls:
+      // Anthropic documents that a thinking-disabled Sonnet 5 is less likely to
+      // reach for tools or consider searching. This call's entire job is to
+      // search, and a batch that quietly skips search produces ungrounded
+      // results — the exact failure the grounding check exists to catch.
+      // Effort is the safe lever instead.
+      effort: "medium",
     };
     // max_uses matters a lot: without it Claude decides how many searches to
     // run, and production logs showed a single call doing 22 searches and

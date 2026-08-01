@@ -39,7 +39,18 @@ export function useApplicationKit(
         '"willRelocate":string("Yes"|"No"|"Confirm"),' +
         '"screeningAnswers":[{"q":string,"a":string}] (write ready-to-paste answers to 4-5 common portal questions tailored to THIS job and company, e.g. "Why do you want to work here?", "Describe your most relevant experience", "What is your greatest strength?")},' +
         '"prepNotes":[string(2-4 quick tips: keywords to add, likely interview themes, or gaps to address)]}';
-      const { text } = await callClaude({ content: resumeContent(instruction), maxTokens: 4096, model: selectedModel });
+      // Stays on the user's selected model: the cover letter is the most
+      // quality-sensitive text the app produces, and it's what they actually
+      // send to an employer. Thinking off (no tools here) with medium effort —
+      // per Anthropic, Sonnet 5 at medium ≈ Sonnet 4.6 at high, so this is a
+      // smaller quality step than the token saving suggests.
+      const { text } = await callClaude({
+        content: resumeContent(instruction),
+        maxTokens: 4096,
+        model: selectedModel,
+        thinking: "disabled",
+        effort: "medium",
+      });
       setKit(extractJson<ApplicationKit>(text));
     } catch (e: any) { setError(e.message); setActiveJob(null); }
     setBuildingKit(false);

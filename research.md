@@ -458,6 +458,80 @@ rather than new code:**
   had real content to ground its answer in — the actual gap was that we
   never *checked* against that grounding, which item 1 above now fixes.
 
+### 0.10 Token-cost pass, phase 1: thinking, effort, and per-task model routing
+
+Investigated cost systematically against Anthropic's current docs rather than
+from memory (the pricing, per-model capability, and default-behavior details
+below all changed recently enough that a stale prior would have been wrong).
+Three levers were being left entirely unused:
+
+1. **Adaptive thinking was silently on.** On Sonnet 5, *omitting* the `thinking`
+   parameter runs adaptive thinking — a behavior change from Sonnet 4.6, where
+   omitting it meant no thinking. The app never set the field, so every call
+   was paying for thinking tokens, billed as output and invisible in the
+   response body. Hard evidence from this session's own logs: a "Say PONG"
+   request returned `output_tokens: 10` of which `thinking_tokens: 9`.
+2. **`output_config.effort` was never set**, so every call ran at the default
+   `high` — the expensive end of a five-level ladder.
+3. **No per-task model routing** — the user's single model selection drove
+   every call, including mechanical extraction.
+
+**Applied (phase 1):**
+- `analyzeResume` → cheapest model (`claude-haiku-4-5`, $1/$5 vs Sonnet 5's
+  $3/$15 per MTok), thinking disabled, effort `low`. Pure structured
+  extraction; no tools involved.
+- `prepareApplication` → stays on the user's selected model (the cover letter
+  is the most quality-sensitive output and the thing they actually send an
+  employer), thinking disabled, effort `medium`.
+- `searchBatch` → effort `medium`, and **thinking deliberately left on**.
+  Anthropic documents that a thinking-disabled Sonnet 5 is *less likely to
+  reach for tools or consider searching*; suppressing it on the one call whose
+  entire job is to search would risk ungrounded results — precisely the failure
+  §0.8's grounding check exists to catch.
+- Full per-call usage logging (`evt: "llm_usage"`) covering input, output,
+  **thinking**, cache-read, cache-write, search count, and grounded-URL count,
+  so future cost questions are a log query rather than an estimate.
+
+**The capability trap this exposed.** `output_config.effort` returns a **400**
+on Haiku 4.5, which has neither effort nor adaptive thinking. Because the tier
+routing can *change* the model mid-request, capability is resolved against the
+**final** model and unsupported params are dropped rather than forwarded — a
+caller asking for a param the model lacks gets that model's default, never an
+error. Verified by logging the actual outbound request body (credits were
+exhausted, but the request is still constructed and sent before Anthropic
+rejects it, so the shape is observable for free): the cheap-tier and
+user-selected-Haiku cases both correctly drop `effort`/`thinking`, the Sonnet
+cases keep them, and the search call correctly carries no `thinking` field.
+
+**Honest limits of this phase.** Model routing helps *least* where the money
+actually goes: cost concentrates in `searchBatch` (6 calls/click, each pulling
+search results into context at the model's input rate), and that is exactly
+the call too quality-sensitive to downgrade. Routing only the one-per-session
+extraction call to Haiku is a real but modest saving.
+
+**Prompt caching was measured and rejected, not assumed.** Anthropic's minimum
+cacheable prefix for `claude-sonnet-5` is 1024 tokens. Measured against real
+prompt construction: the search call's stable prefix is ~520 tokens and a
+typical 3k-character resume ~811 — both below the floor; only a long (6k+)
+resume clears it. Compounding that, the current prompt ordering would defeat
+caching anyway (the per-batch exclude list precedes the stable profile/schema;
+resume text follows the per-job instruction), since caching is a prefix match
+and both put volatile content first. Reordering is cheap insurance and worth
+doing, but at typical resume length it would not have saved money — the
+earlier §0 note that caching wasn't worth it holds, now with numbers behind it.
+
+**Phase 2, deliberately deferred:** upgrading `web_search_20250305` →
+`web_search_20260209`, which adds **dynamic filtering** (Claude filters results
+before they enter the context window) and targets the single biggest cost —
+search results dominating input tokens; one call was observed pulling 181 pages
+in. Held back because with dynamic filtering the `web_search_tool_result`
+blocks become *nested* inside code-execution results, and `extractGroundedUrls`
+only walks top-level blocks — shipping it blind would silently break the
+grounding check, and a grounding check that fails open is the exact bug class
+§0.1–§0.9 were spent fixing. Needs verification against a real response first.
+
+---
+
 ### 0.9 Local-dev 403 chased down to two real causes, plus a port move
 
 User reported a 403 on `/api/claude` while debugging locally. Diagnosed by
